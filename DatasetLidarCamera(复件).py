@@ -27,14 +27,10 @@ from torchvision import transforms
 import torch.nn.functional as F
 import time
 
-from utils import invert_pose, rotate_forward, quaternion_from_matrix, rotate_back
+
+from utils import invert_pose, rotate_forward, quaternion_from_matrix,rotate_back
 from pykitti import odometry
 import pykitti
-
-torch.set_num_threads(1)
-import os
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
 
 def read_calib_file(filepath):
     """Read in a calibration file and parse into a dictionary."""
@@ -52,7 +48,6 @@ def read_calib_file(filepath):
 
     return data
 
-
 def get_2D_lidar_projection(pcl, cam_intrinsic):
     pcl_xyz = cam_intrinsic @ pcl.T
     pcl_xyz = pcl_xyz.T
@@ -62,7 +57,6 @@ def get_2D_lidar_projection(pcl, cam_intrinsic):
 
     return pcl_uv, pcl_z
 
-
 def lidar_project_depth(pc_rotated, cam_calib, img_shape):
     pc_rotated = pc_rotated[:3, :].detach().cpu().numpy()
     cam_intrinsic = cam_calib
@@ -71,8 +65,6 @@ def lidar_project_depth(pc_rotated, cam_calib, img_shape):
             pcl_uv[:, 1] < img_shape[0]) & (pcl_z > 0)
     pcl_uv = pcl_uv[mask]
     pcl_z = pcl_z[mask]
-    pcl_xy = pc_rotated[0:2, mask].transpose(1,0)
-    pcl_xyz = np.concatenate([pcl_xy, pcl_z[:,None]], axis = 1)
     pcl_uv = pcl_uv.astype(np.uint32)
     pcl_z = pcl_z.reshape(-1, 1)
     depth_img = np.zeros((img_shape[0], img_shape[1], 1))
@@ -81,25 +73,24 @@ def lidar_project_depth(pc_rotated, cam_calib, img_shape):
     depth_img = depth_img
     depth_img = depth_img.permute(2, 0, 1)
 
-    return depth_img, pcl_uv, pcl_xyz, mask
-
+    return depth_img, pcl_uv
 
 class DatasetLidarCameraKittiOdometry(Dataset):
 
     def __init__(self, dataset_dir, transform=None, augmentation=False, use_reflectance=False,
-                 max_t=1.5, max_r=20., split='val', device='cpu', val_sequence='00', suf='.png', val=False,
-                 dataset=None, config=None, img_shape=None, max_points=20000, input_size=None):
+                 max_t=1.5, max_r=20., split='val', device='cpu', val_sequence='00', suf='.png',val=False,
+                 dataset=None,config=None, img_shape = None, max_points = 20000):
         super(DatasetLidarCameraKittiOdometry, self).__init__()
         self._config = config
         self.img_shape = img_shape
         self.max_points = max_points
-        self.input_size = input_size
+        
         print('excute kitti dataset init')
         self.__init_kitti_data__(dataset_dir, transform, augmentation, use_reflectance,
-                                 max_t, max_r, split, device, val_sequence, suf)
+                max_t, max_r, split, device, val_sequence, suf)
 
     def __init_kitti_data__(self, dataset_dir, transform=None, augmentation=False, use_reflectance=False,
-                            max_t=1.5, max_r=20., split='val', device='cpu', val_sequence='00', suf='.png'):
+                 max_t=1.5, max_r=20., split='val', device='cpu', val_sequence='00', suf='.png'):
         self.use_reflectance = use_reflectance
         self.maps_folder = ''
         self.device = device
@@ -125,25 +116,24 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         for seq in self.sequence_list:
             odom = odometry(self.root_dir, seq)
             calib = odom.calib
-            T_cam02_velo_np = calib.T_cam2_velo  # gt pose from cam02 to velo_lidar (T_cam02_velo: 4x4)
-            self.K[seq] = calib.K_cam2  # 3x3
+            T_cam02_velo_np = calib.T_cam2_velo #gt pose from cam02 to velo_lidar (T_cam02_velo: 4x4)
+            self.K[seq] = calib.K_cam2 # 3x3
             # T_cam02_velo = torch.from_numpy(T_cam02_velo_np)
             # GT_R = quaternion_from_matrix(T_cam02_velo[:3, :3])
             # GT_T = T_cam02_velo[3:, :3]
             # self.GTs_R[seq] = GT_R # GT_R = np.array([row['qw'], row['qx'], row['qy'], row['qz']])
             # self.GTs_T[seq] = GT_T # GT_T = np.array([row['x'], row['y'], row['z']])
-            self.GTs_T_cam02_velo[seq] = T_cam02_velo_np  # gt pose from cam02 to velo_lidar (T_cam02_velo: 4x4)
+            self.GTs_T_cam02_velo[seq] = T_cam02_velo_np #gt pose from cam02 to velo_lidar (T_cam02_velo: 4x4)
 
             image_list = os.listdir(os.path.join(dataset_dir, 'sequences', seq, 'image_2'))
             image_list.sort()
 
             for image_name in image_list:
-
                 if not os.path.exists(os.path.join(dataset_dir, 'sequences', seq, 'velodyne',
-                                                   str(image_name.split('.')[0]) + '.bin')):
+                                                   str(image_name.split('.')[0])+'.bin')):
                     continue
                 if not os.path.exists(os.path.join(dataset_dir, 'sequences', seq, 'image_2',
-                                                   str(image_name.split('.')[0]) + suf)):
+                                                   str(image_name.split('.')[0])+suf)):
                     continue
                 if seq == val_sequence:
                     if split.startswith('val') or split == 'test':
@@ -177,11 +167,12 @@ class DatasetLidarCameraKittiOdometry(Dataset):
                     transl_z = np.random.uniform(-max_t, max_t)
                     # transl_z = np.random.uniform(-max_t, min(max_t, 1.))
                     val_RT_file.writerow([i, transl_x, transl_y, transl_z,
-                                          rotx, roty, rotz])
+                                           rotx, roty, rotz])
                     self.val_RT.append([float(i), float(transl_x), float(transl_y), float(transl_z),
-                                        float(rotx), float(roty), float(rotz)])
+                                         float(rotx), float(roty), float(rotz)])
 
             assert len(self.val_RT) == len(self.all_files), "Something wrong with test RTs"
+
 
     def get_ground_truth_poses(self, sequence, frame):
         return self.GTs_T[sequence][frame], self.GTs_R[sequence][frame]
@@ -191,15 +182,15 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         normalization = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                              std=[0.229, 0.224, 0.225])
 
-        # rgb = crop(rgb)
+        #rgb = crop(rgb)
         if self.split == 'train':
             color_transform = transforms.ColorJitter(0.1, 0.1, 0.1)
             rgb = color_transform(rgb)
             if flip:
                 rgb = TTF.hflip(rgb)
             rgb = TTF.rotate(rgb, img_rotation)
-            # io.imshow(np.array(rgb))
-            # io.show()
+            #io.imshow(np.array(rgb))
+            #io.show()
 
         rgb = to_tensor(rgb)
         rgb = normalization(rgb)
@@ -212,8 +203,8 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         item = self.all_files[idx]
         seq = str(item.split('/')[0])
         rgb_name = str(item.split('/')[1])
-        img_path = os.path.join(self.root_dir, 'sequences', seq, 'image_2', rgb_name + self.suf)
-        lidar_path = os.path.join(self.root_dir, 'sequences', seq, 'velodyne', rgb_name + '.bin')
+        img_path = os.path.join(self.root_dir, 'sequences', seq, 'image_2', rgb_name+self.suf)
+        lidar_path = os.path.join(self.root_dir, 'sequences', seq, 'velodyne', rgb_name+'.bin')
         lidar_scan = np.fromfile(lidar_path, dtype=np.float32)
         pc = lidar_scan.reshape((-1, 4))
         valid_indices = pc[:, 0] < -3.
@@ -222,9 +213,9 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         valid_indices = valid_indices | (pc[:, 1] > 3.)
         pc = pc[valid_indices].copy()
         if pc.shape[0] >= self.max_points:
-            pc = pc[:self.max_points, :]
+            pc = pc[:self.max_points,:]
         else:
-            pc = np.pad(pc, [[0, self.max_points - pc.shape[0]], [0, 0]], constant_values=0)
+            pc = np.pad(pc, [[0,self.max_points - pc.shape[0]],[0, 0]], constant_values=0)
         pc_org = torch.from_numpy(pc.astype(np.float32))
         # if self.use_reflectance:
         #     reflectance = pc[:, 3].copy()
@@ -242,25 +233,10 @@ class DatasetLidarCameraKittiOdometry(Dataset):
                 pc_org[3, :] = 1.
         else:
             raise TypeError("Wrong PointCloud shape")
-        pc_rot = np.matmul(RT, pc_org.numpy())
+        pc_rot = np.matmul(RT,pc_org.numpy())
         # a = (RT @ pc_org.T).T
         pc_rot = pc_rot.astype(np.float32).copy()
         pc_in = torch.from_numpy(pc_rot)
-
-        # pc_rot = np.matmul(RT, pc.T)
-        # pc_rot = pc_rot.astype(np.float).T.copy()
-        # pc_in = torch.from_numpy(pc_rot.astype(np.float32))#.float()
-
-        # if pc_in.shape[1] == 4 or pc_in.shape[1] == 3:
-        #     pc_in = pc_in.t()
-        # if pc_in.shape[0] == 3:
-        #     homogeneous = torch.ones(pc_in.shape[1]).unsqueeze(0)
-        #     pc_in = torch.cat((pc_in, homogeneous), 0)
-        # elif pc_in.shape[0] == 4:
-        #      if not torch.all(pc_in[3,:] == 1.):
-        #         pc_in[3,:] = 1.
-        # else:
-        #     raise TypeError("Wrong PointCloud shape")
 
         h_mirror = False
         # if np.random.rand() > 0.5 and self.split == 'train':
@@ -311,11 +287,11 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         R, T = invert_pose(R, T)
         R, T = torch.tensor(R), torch.tensor(T)
 
-        # io.imshow(depth_img.numpy(), cmap='jet')
-        # io.show()
+        #io.imshow(depth_img.numpy(), cmap='jet')
+        #io.show()
         calib = self.K[seq]
         if h_mirror:
-            calib[2] = (img.shape[2] / 2) * 2 - calib[2]
+            calib[2] = (img.shape[2] / 2)*2 - calib[2]
 
         real_shape = [img.shape[1], img.shape[2], img.shape[0]]
 
@@ -325,7 +301,7 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         if self._config['max_depth'] < 80.:
             pc_lidar = pc_lidar[:, pc_lidar[0, :] < self._config['max_depth']].clone()
 
-        depth_gt, uv, pcl_xyz = lidar_project_depth(pc_lidar, calib, real_shape)  # image_shape
+        depth_gt, uv = lidar_project_depth(pc_lidar, calib, real_shape) # image_shape
         depth_gt /= self._config['max_depth']
 
         RR = mathutils.Quaternion(R).to_matrix()
@@ -333,15 +309,15 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         TT = mathutils.Matrix.Translation(T)
         RT_ = TT * RR
 
-        pc_rotated = rotate_back(pc_in, RT_)  # Pc` = RT * Pc
+        pc_rotated = rotate_back(pc_in, RT_) # Pc` = RT * Pc
 
         if self._config['max_depth'] < 80.:
             pc_rotated = pc_rotated[:, pc_rotated[0, :] < self._config['max_depth']].clone()
 
-        depth_img, uv, pcl_xyz, mask = lidar_project_depth(pc_rotated, calib, real_shape)  # image_shape
+        depth_img, uv = lidar_project_depth(pc_rotated, calib, real_shape) # image_shape
         depth_img /= self._config['max_depth']
 
-        # PAD ONLY ON RIGHT AND BOTTOM SIDE 这样不会改变内参
+        # PAD ONLY ON RIGHT AND BOTTOM SIDE
         rgb = img
         shape_pad = [0, 0, 0, 0]
 
@@ -353,23 +329,17 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         depth_img = F.pad(depth_img, shape_pad)
         depth_gt = F.pad(depth_gt, shape_pad)
 
-        uv2 = np.zeros((self.max_points, 2), dtype = np.int64)
-        pcl_xyz2 = np.zeros((self.max_points, 3), dtype=np.int64)
-        uv2[0 : uv.shape[0], :] = uv
-        pcl_xyz2[0 : uv.shape[0], :] = pcl_xyz
-        #16 32, 32 64, 64 128, 128 256,
         if self.split == 'test':
             sample = {'rgb': img, 'point_cloud': pc_in, 'calib': calib,
                       'tr_error': T, 'rot_error': R, 'seq': int(seq), 'img_path': img_path,
                       'rgb_name': rgb_name + '.png', 'item': item, 'extrin': RT,
-                      'initial_RT': initial_RT, 'uv': uv2 'mask': mask,'pcl_xyz' : pcl_xyz2}
+                      'initial_RT': initial_RT}
         else:
             sample = {'rgb': img, 'point_cloud': pc_in, 'calib': calib,
                       'tr_error': T, 'rot_error': R, 'seq': int(seq),
-                      'rgb_name': rgb_name, 'item': item, 'extrin': RT, 'lidar_input': depth_img,
-                      'rgb_input': rgb, 'pc_rotated': pc_rotated, 'shape_pad': shape_pad,
-                      'real_shape': real_shape, 'depth_gt': depth_gt, 'uv': uv2,
-                      'mask':mask, 'pcl_xyz':pcl_xyz2}
+                      'rgb_name': rgb_name, 'item': item, 'extrin': RT,'lidar_input': depth_img,'rgb_input': rgb,
+                      'pc_rotated': pc_rotated, 'shape_pad': shape_pad, 'real_shape': real_shape, 'depth_gt': depth_gt
+                      }
 
         return sample
 
@@ -433,10 +403,10 @@ class DatasetLidarCameraKittiRaw(Dataset):
 
             for image_name in image_list:
                 if not os.path.exists(os.path.join(dataset_dir, date, seq, 'velodyne_points/data',
-                                                   str(image_name.split('.')[0]) + '.bin')):
+                                                   str(image_name.split('.')[0])+'.bin')):
                     continue
                 if not os.path.exists(os.path.join(dataset_dir, date, seq, 'image_02/data',
-                                                   str(image_name.split('.')[0]) + '.jpg')):  # png
+                                                   str(image_name.split('.')[0])+'.jpg')): # png
                     continue
                 if seq == val_sequence and (not split == 'train'):
                     self.all_files.append(os.path.join(date, seq, 'image_02/data', image_name.split('.')[0]))
@@ -467,9 +437,9 @@ class DatasetLidarCameraKittiRaw(Dataset):
                     transl_z = np.random.uniform(-max_t, max_t)
                     # transl_z = np.random.uniform(-max_t, min(max_t, 1.))
                     val_RT_file.writerow([i, transl_x, transl_y, transl_z,
-                                          rotx, roty, rotz])
+                                           rotx, roty, rotz])
                     self.val_RT.append([float(i), transl_x, transl_y, transl_z,
-                                        rotx, roty, rotz])
+                                         rotx, roty, rotz])
 
             assert len(self.val_RT) == len(self.all_files), "Something wrong with test RTs"
 
@@ -481,7 +451,7 @@ class DatasetLidarCameraKittiRaw(Dataset):
         normalization = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                              std=[0.229, 0.224, 0.225])
 
-        # rgb = crop(rgb )
+        #rgb = crop(rgb)
         if self.split == 'train':
             color_transform = transforms.ColorJitter(0.1, 0.1, 0.1)
             # color_transform = transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.3 / 3.14)
@@ -489,8 +459,8 @@ class DatasetLidarCameraKittiRaw(Dataset):
             if flip:
                 rgb = TTF.hflip(rgb)
             rgb = TTF.rotate(rgb, img_rotation)
-            # io.imshow(np.array(rgb))
-            # io.show()
+            #io.imshow(np.array(rgb))
+            #io.show()
 
         rgb = to_tensor(rgb)
         # rgb = normalization(rgb)
@@ -505,8 +475,8 @@ class DatasetLidarCameraKittiRaw(Dataset):
         date = str(item.split('/')[0])
         seq = str(item.split('/')[1])
         rgb_name = str(item.split('/')[4])
-        img_path = os.path.join(self.root_dir, date, seq, 'image_02/data', rgb_name + '.jpg')  # png
-        lidar_path = os.path.join(self.root_dir, date, seq, 'velodyne_points/data', rgb_name + '.bin')
+        img_path = os.path.join(self.root_dir, date, seq, 'image_02/data', rgb_name+'.jpg') # png
+        lidar_path = os.path.join(self.root_dir, date, seq, 'velodyne_points/data', rgb_name+'.bin')
         lidar_scan = np.fromfile(lidar_path, dtype=np.float32)
         pc = lidar_scan.reshape((-1, 4))
         valid_indices = pc[:, 0] < -3.
@@ -593,8 +563,8 @@ class DatasetLidarCameraKittiRaw(Dataset):
         R, T = invert_pose(R, T)
         R, T = torch.tensor(R), torch.tensor(T)
 
-        # io.imshow(depth_img.numpy(), cmap='jet')
-        # io.show()
+        #io.imshow(depth_img.numpy(), cmap='jet')
+        #io.show()
         calib = calib_cam02
         # calib = get_calib_kitti_odom(int(seq))
         if h_mirror:
@@ -608,7 +578,6 @@ class DatasetLidarCameraKittiRaw(Dataset):
                   'extrin': E_RT, 'initial_RT': initial_RT, 'pc_lidar': pc_lidar}
 
         return sample
-
 
 class MultiEpochsDataLoader(torch.utils.data.DataLoader):
 
@@ -639,3 +608,4 @@ class _RepeatSampler(object):
     def __iter__(self):
         while True:
             yield from iter(self.sampler)
+

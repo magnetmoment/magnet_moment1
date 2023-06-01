@@ -24,9 +24,9 @@ def rotate_points(PC, R, T=None, inverse=True):
         R = R.to_matrix()
         R.resize_4x4()
         T = mathutils.Matrix.Translation(T)
-        RT = T*R
+        RT = T * R
     else:
-        RT=R.copy()
+        RT = R.copy()
     if inverse:
         RT.invert_safe()
     RT = torch.tensor(RT, device=PC.device, dtype=torch.float)
@@ -60,6 +60,7 @@ def rotate_points_torch(PC, R, T=None, inverse=True):
         raise TypeError("Point cloud must have shape [Nx4] or [4xN] (homogeneous coordinates)")
     return PC
 
+
 def rotate_points_torch_batch(PC, R, T=None, inverse=True):
     if T is not None:
         R = quat2mat_batch(R)
@@ -73,11 +74,12 @@ def rotate_points_torch_batch(PC, R, T=None, inverse=True):
     if PC.shape[1] == 4:
         PC = torch.bmm(RT, PC)
     elif PC.shape[2] == 4:
-        PC = torch.bmm(RT, PC.permute(0,2,1))
+        PC = torch.bmm(RT, PC.permute(0, 2, 1))
         PC = PC.t()
     else:
         raise TypeError("Point cloud must have shape [Nx4] or [4xN] (homogeneous coordinates)")
     return PC
+
 
 def rotate_forward_batch(PC, R, T=None):
     """
@@ -111,6 +113,7 @@ def rotate_back_batch(PC_ROTATED, R, T=None):
         return rotate_points_torch_batch(PC_ROTATED, R, T, inverse=False)
     else:
         return rotate_points(PC_ROTATED, R, T, inverse=False)
+
 
 def rotate_forward(PC, R, T=None):
     """
@@ -173,14 +176,15 @@ def merge_inputs(queries):
     pc_rotated = []
     shape_pad = []
     real_shape = []
+    initial_RT = []
     depth_gt = []
     ignore_keys = ['point_cloud', 'rgb', 'reflectance', 'pc_rotated', 'shape_pad', 'real_shape', 'depth_gt']
-    returns = {key: default_collate([d[key] for d in queries]) for key in queries[0]
-               if key not in ignore_keys}
+    returns = {key: default_collate([d[key] for d in queries]) for key in queries[0] if key not in ignore_keys}
     for input in queries:
         point_clouds.append(input['point_cloud'])
         imgs.append(input['rgb'])
-
+        if 'initial_RT' in input:
+            initial_RT.append(input['initial_RT'])
         if 'pc_rotated' in input:
             pc_rotated.append(input['pc_rotated'])
         if 'shape_pad' in input:
@@ -193,7 +197,9 @@ def merge_inputs(queries):
             reflectances.append(input['reflectance'])
     returns['point_cloud'] = point_clouds
     returns['rgb'] = imgs
-    
+
+    if len(initial_RT) > 0:
+        returns['initial_RT'] = initial_RT
     if len(pc_rotated) > 0:
         returns['pc_rotated'] = pc_rotated
     if len(shape_pad) > 0:
@@ -225,7 +231,7 @@ def quaternion_from_matrix(matrix):
     tr = R[0, 0] + R[1, 1] + R[2, 2]
     q = torch.zeros(4, device=matrix.device)
     if tr > 0.:
-        S = (tr+1.0).sqrt() * 2
+        S = (tr + 1.0).sqrt() * 2
         q[0] = 0.25 * S
         q[1] = (R[2, 1] - R[1, 2]) / S
         q[2] = (R[0, 2] - R[2, 0]) / S
@@ -282,17 +288,18 @@ def quat2mat(q):
     if q.norm() != 1.:
         q = q / q.norm()
     mat = torch.zeros((4, 4), device=q.device)
-    mat[0, 0] = 1 - 2*q[2]**2 - 2*q[3]**2
-    mat[0, 1] = 2*q[1]*q[2] - 2*q[3]*q[0]
-    mat[0, 2] = 2*q[1]*q[3] + 2*q[2]*q[0]
-    mat[1, 0] = 2*q[1]*q[2] + 2*q[3]*q[0]
-    mat[1, 1] = 1 - 2*q[1]**2 - 2*q[3]**2
-    mat[1, 2] = 2*q[2]*q[3] - 2*q[1]*q[0]
-    mat[2, 0] = 2*q[1]*q[3] - 2*q[2]*q[0]
-    mat[2, 1] = 2*q[2]*q[3] + 2*q[1]*q[0]
-    mat[2, 2] = 1 - 2*q[1]**2 - 2*q[2]**2
+    mat[0, 0] = 1 - 2 * q[2] ** 2 - 2 * q[3] ** 2
+    mat[0, 1] = 2 * q[1] * q[2] - 2 * q[3] * q[0]
+    mat[0, 2] = 2 * q[1] * q[3] + 2 * q[2] * q[0]
+    mat[1, 0] = 2 * q[1] * q[2] + 2 * q[3] * q[0]
+    mat[1, 1] = 1 - 2 * q[1] ** 2 - 2 * q[3] ** 2
+    mat[1, 2] = 2 * q[2] * q[3] - 2 * q[1] * q[0]
+    mat[2, 0] = 2 * q[1] * q[3] - 2 * q[2] * q[0]
+    mat[2, 1] = 2 * q[2] * q[3] + 2 * q[1] * q[0]
+    mat[2, 2] = 1 - 2 * q[1] ** 2 - 2 * q[2] ** 2
     mat[3, 3] = 1.
     return mat
+
 
 def quat2mat_batch(q):
     """
@@ -304,24 +311,26 @@ def quat2mat_batch(q):
         torch.Tensor: [4x4] homogeneous rotation matrix
     """
     assert q.shape[1] == 4, "Not a valid quaternion"
-    q = q / q.norm(dim=[1]).reshape(q.shape[0],1)
+    q = q / q.norm(dim=[1]).reshape(q.shape[0], 1)
     mat = torch.zeros((q.shape[0], 4, 4), device=q.device)
-    mat[:,0, 0] = 1 - 2*q[:,2]**2 - 2*q[:,3]**2
-    mat[:, 0, 1] = 2*q[:, 1]*q[:, 2] - 2*q[:, 3]*q[:, 0]
-    mat[:, 0, 2] = 2*q[:, 1]*q[:, 3] + 2*q[:, 2]*q[:, 0]
-    mat[:, 1, 0] = 2*q[:, 1]*q[:, 2] + 2*q[:, 3]*q[:, 0]
-    mat[:, 1, 1] = 1 - 2*q[:, 1]**2 - 2*q[:, 3]**2
-    mat[:, 1, 2] = 2*q[:, 2]*q[:, 3] - 2*q[:, 1]*q[:, 0]
-    mat[:, 2, 0] = 2*q[:, 1]*q[:, 3] - 2*q[:, 2]*q[:, 0]
-    mat[:, 2, 1] = 2*q[:, 2]*q[:, 3] + 2*q[:, 1]*q[:, 0]
-    mat[:, 2, 2] = 1 - 2*q[:, 1]**2 - 2*q[:, 2]**2
+    mat[:, 0, 0] = 1 - 2 * q[:, 2] ** 2 - 2 * q[:, 3] ** 2
+    mat[:, 0, 1] = 2 * q[:, 1] * q[:, 2] - 2 * q[:, 3] * q[:, 0]
+    mat[:, 0, 2] = 2 * q[:, 1] * q[:, 3] + 2 * q[:, 2] * q[:, 0]
+    mat[:, 1, 0] = 2 * q[:, 1] * q[:, 2] + 2 * q[:, 3] * q[:, 0]
+    mat[:, 1, 1] = 1 - 2 * q[:, 1] ** 2 - 2 * q[:, 3] ** 2
+    mat[:, 1, 2] = 2 * q[:, 2] * q[:, 3] - 2 * q[:, 1] * q[:, 0]
+    mat[:, 2, 0] = 2 * q[:, 1] * q[:, 3] - 2 * q[:, 2] * q[:, 0]
+    mat[:, 2, 1] = 2 * q[:, 2] * q[:, 3] + 2 * q[:, 1] * q[:, 0]
+    mat[:, 2, 2] = 1 - 2 * q[:, 1] ** 2 - 2 * q[:, 2] ** 2
     mat[:, 3, 3] = 1.
     return mat
+
 
 def inverse_batch(b_mat):
     eye = b_mat.new_ones(b_mat.size(-1)).diag().expand_as(b_mat)
     b_inv, _ = torch.solve(eye, b_mat)
     return b_inv
+
 
 def tvector2mat(t):
     """
@@ -339,6 +348,7 @@ def tvector2mat(t):
     mat[1, 3] = t[1]
     mat[2, 3] = t[2]
     return mat
+
 
 def tvector2mat_batch(t):
     """
@@ -358,6 +368,7 @@ def tvector2mat_batch(t):
     mat[:, 2, 3] = t[:, 2]
     return mat
 
+
 def mat2xyzrpy(rotmatrix):
     """
     Decompose transformation matrix into components
@@ -368,7 +379,7 @@ def mat2xyzrpy(rotmatrix):
         torch.Tensor: shape=[6], contains xyzrpy
     """
     roll = math.atan2(-rotmatrix[1, 2], rotmatrix[2, 2])
-    pitch = math.asin ( rotmatrix[0, 2])
+    pitch = math.asin(rotmatrix[0, 2])
     yaw = math.atan2(-rotmatrix[0, 1], rotmatrix[0, 0])
     x = rotmatrix[:3, 3][0]
     y = rotmatrix[:3, 3][1]
@@ -388,29 +399,29 @@ def overlay_imgs(rgb, lidar, idx=0):
     std = [0.229, 0.224, 0.225]
     mean = [0.485, 0.456, 0.406]
 
-    rgb = rgb.clone().cpu().permute(1,2,0).numpy()
-    rgb = rgb*std+mean
+    rgb = rgb.clone().cpu().permute(1, 2, 0).numpy()
+    rgb = rgb * std + mean
     lidar = lidar.clone()
 
     lidar[lidar == 0] = 1000.
     lidar = -lidar
-    #lidar = F.max_pool2d(lidar, 3, 1, 1)
+    # lidar = F.max_pool2d(lidar, 3, 1, 1)
     lidar = F.max_pool2d(lidar, 3, 1, 1)
     lidar = -lidar
     lidar[lidar == 1000.] = 0.
 
-    #lidar = lidar.squeeze()
+    # lidar = lidar.squeeze()
     lidar = lidar[0][0]
-    lidar = (lidar*255).int().cpu().numpy()
+    lidar = (lidar * 255).int().cpu().numpy()
     lidar_color = cm.jet(lidar)
     lidar_color[:, :, 3] = 0.5
     lidar_color[lidar == 0] = [0, 0, 0, 0]
     blended_img = lidar_color[:, :, :3] * (np.expand_dims(lidar_color[:, :, 3], 2)) + \
                   rgb * (1. - np.expand_dims(lidar_color[:, :, 3], 2))
     blended_img = blended_img.clip(min=0., max=1.)
-    #io.imshow(blended_img)
-    #io.show()
-    #plt.figure()
-    #plt.imshow(blended_img)
-    #io.imsave(f'./IMGS/{idx:06d}.png', blended_img)
+    # io.imshow(blended_img)
+    # io.show()
+    # plt.figure()
+    # plt.imshow(blended_img)
+    # io.imsave(f'./IMGS/{idx:06d}.png', blended_img)
     return blended_img

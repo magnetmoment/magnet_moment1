@@ -9,12 +9,14 @@
 # Modified Author: Xudong Lv
 # based on github.com/cattaneod/CMRNet/blob/master/main_visibility_CALIB.py
 import torch.multiprocessing
+
 torch.multiprocessing.set_sharing_strategy('file_system')
 from logger import *
 import math
 import os
 import random
 import time
+from tqdm import tqdm
 
 # import apex
 import mathutils
@@ -36,8 +38,8 @@ from models.LCCNet import LCCNet
 from quaternion_distances import quaternion_distance
 
 from tensorboardX import SummaryWriter
-from utils import (mat2xyzrpy, merge_inputs, overlay_imgs, quat2mat,
-                   quaternion_from_matrix, rotate_back, rotate_forward,
+from utils import (merge_inputs, overlay_imgs, quat2mat,
+                   rotate_back, rotate_forward,
                    tvector2mat)
 
 torch.backends.cudnn.enabled = True
@@ -50,22 +52,25 @@ ex.captured_out_filter = apply_backspaces_and_linefeeds
 # noinspection PyUnusedLocal
 @ex.config
 def config():
-    checkpoints = './checkpoints/'
-    dataset = 'kitti/odom' # 'kitti/raw'
-    data_folder = '/data/kitti_odometry/dataset'
+    checkpoints = '/root/autodl-tmp/LCCNet/output/'
+    # dataset = 'kitti/odom' # 'kitti/raw'
+    # data_folder = '/home/wangshuo/Datasets/KITTI/odometry/data_odometry_full/'
+    dataset = 'kitti/odom'  # 'kitti/raw'
+    data_folder = '/root/autodl-tmp/semantic-kitti/dataset/SemanticKITTI'
+    # data_folder = '/media/hust1105/8AAAE75DAAE743F3/dzp/semantic-kitti/dataset/SemanticKITTI'
     use_reflectance = False
     val_sequence = 0
-    epochs = 120
+    epochs = 50
     BASE_LEARNING_RATE = 3e-4  # 1e-4
     loss = 'combined'
-    max_t = 1.5 # 1.5, 1.0,  0.5,  0.2,  0.1
-    max_r = 20 # 20.0, 10.0, 5.0,  2.0,  1.0
-    batch_size = 240  # 120
-    num_worker = 16
+    max_t = 1.5  # 1.5, 1.0,  0.5,  0.2,  0.1
+    max_r = 20.0  # 20.0, 10.0, 5.0,  2.0,  1.0
+    batch_size = 32  # 120
+    num_worker = 10
     network = 'Res_f1'
     optimizer = 'adam'
     resume = True
-    weights = 'checkpoints/kitti/odom/val_seq_00/models/checkpoint_r20.00_t1.50_e43_0.196.tar'
+    weights ='/root/autodl-tmp/LCCNet/final_model1.tar'
     rescale_rot = 1.0
     rescale_transl = 2.0
     precision = "O0"
@@ -73,18 +78,21 @@ def config():
     dropout = 0.0
     max_depth = 80.
     weight_point_cloud = 0.5
-    log_frequency = 50
-    print_frequency = 50
+    log_frequency = 100
+    print_frequency = 100
     starting_epoch = -1
-    max_points = 100000
+    max_points = 24000
+
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # os.environ['CUDA_VISIBLE_DEVICES'] = '4,5,6,7'
 
 
 EPOCH = 1
+
+
 def _init_fn(worker_id, seed):
-    seed = seed + worker_id + EPOCH*100
+    seed = seed + worker_id + EPOCH * 100
     INFO(f"Init worker {worker_id} with seed {seed}")
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -180,6 +188,12 @@ def val(model, rgb_img, refl_img, target_transl, target_rot, loss_fn, point_clou
 
 @ex.automain
 def main(_config, _run, seed):
+    import torch
+    tt = torch.cuda.is_available()
+    # f = open('/root/autodl-tmp/LCCNet/output/odom/val_seq_00/models/checkpoint_r15.00_t1.50_e197_0.442.tar', 'rb')
+    # data = torch.load(f, map_location='cpu')  # 可使用cpu或gpu
+    # print(data)
+
     global EPOCH
     INFO('Loss Function Choice: {}'.format(_config['loss']))
 
@@ -189,21 +203,21 @@ def main(_config, _run, seed):
         _config['val_sequence'] = f"{_config['val_sequence']:02d}"
         INFO("Val Sequence: {}".format(_config['val_sequence']))
         dataset_class = DatasetLidarCameraKittiOdometry
-    img_shape = (384, 1280) # 网络的输入尺度
+    img_shape = (384, 1280)  # 网络的输入尺度
     input_size = (256, 512)
     _config["checkpoints"] = os.path.join(_config["checkpoints"], _config['dataset'])
 
     dataset_train = dataset_class(_config['data_folder'], max_r=_config['max_r'], max_t=_config['max_t'],
                                   split='train', use_reflectance=_config['use_reflectance'],
-                                  val_sequence=_config['val_sequence'],config=_config, img_shape = img_shape,
-                                  max_points = _config['max_points'])
+                                  val_sequence=_config['val_sequence'], config=_config, img_shape=img_shape,
+                                  max_points=_config['max_points'], input_size = input_size)
     dataset_val = dataset_class(_config['data_folder'], max_r=_config['max_r'], max_t=_config['max_t'],
                                 split='val', use_reflectance=_config['use_reflectance'],
-                                val_sequence=_config['val_sequence'],config=_config, img_shape = img_shape,
-                                max_points = _config['max_points'])
+                                val_sequence=_config['val_sequence'], config=_config, img_shape=img_shape,
+                                max_points=_config['max_points'],input_size = input_size)
     model_savepath = os.path.join(_config['checkpoints'], 'val_seq_' + _config['val_sequence'], 'models')
     if not os.path.exists(model_savepath):
-        os.makedirs(model_savepath)
+        os.makedirs(model_savepath)  # 1220 142
     log_savepath = os.path.join(_config['checkpoints'], 'val_seq_' + _config['val_sequence'], 'log')
     if not os.path.exists(log_savepath):
         os.makedirs(log_savepath)
@@ -213,7 +227,8 @@ def main(_config, _run, seed):
     np.random.seed(seed)
     torch.random.manual_seed(seed)
 
-    def init_fn(x): return _init_fn(x, seed)
+    def init_fn(x):
+        return _init_fn(x, seed)
 
     train_dataset_size = len(dataset_train)
     val_dataset_size = len(dataset_val)
@@ -223,27 +238,25 @@ def main(_config, _run, seed):
     # Training and validation set creation
     num_worker = _config['num_worker']
     batch_size = _config['batch_size']
-    TrainImgLoader = MultiEpochsDataLoader(dataset=dataset_train,
-                                            shuffle=True,
-                                            batch_size=batch_size,
-                                            num_workers=num_worker,
-                                            worker_init_fn=init_fn,
-                                            collate_fn=merge_inputs,
-                                            drop_last=False,
-                                            pin_memory=True)
-
-    ValImgLoader = MultiEpochsDataLoader(dataset=dataset_val,
-                                            shuffle=False,
-                                            batch_size=batch_size,
-                                            num_workers=num_worker,
-                                            worker_init_fn=init_fn,
-                                            collate_fn=merge_inputs,
-                                            drop_last=False,
-                                            pin_memory=True)
-
+    TrainImgLoader = torch.utils.data.DataLoader(dataset=dataset_train,
+                                           shuffle=True,
+                                           batch_size=batch_size,
+                                           num_workers=num_worker,
+                                           worker_init_fn=init_fn,
+                                           collate_fn=merge_inputs,
+                                           drop_last=False,
+                                           pin_memory=True)
     INFO(len(TrainImgLoader))
-    INFO(len(ValImgLoader))
+    ValImgLoader = torch.utils.data.DataLoader(dataset=dataset_val,
+                                               shuffle=False,
+                                               batch_size=batch_size,
+                                               num_workers=num_worker,
+                                               worker_init_fn=init_fn,
+                                               collate_fn=merge_inputs,
+                                               drop_last=False,
+                                               pin_memory=True)
 
+    INFO(len(ValImgLoader))
     # loss function choice
     if _config['loss'] == 'simple':
         loss_fn = ProposedLoss(_config['rescale_transl'], _config['rescale_rot'])
@@ -259,10 +272,10 @@ def main(_config, _run, seed):
     else:
         raise ValueError("Unknown Loss Function")
 
-    #runs = datetime.now().strftime('%b%d_%H-%M-%S') + "/"
+    # runs = datetime.now().strftime('%b%d_%H-%M-%S') + "/"
     # train_writer = SummaryWriter('./logs/' + runs)
-    #ex.info["tensorflow"] = {}
-    #ex.info["tensorflow"]["logdirs"] = ['./logs/' + runs]
+    # ex.info["tensorflow"] = {}
+    # ex.info["tensorflow"]["logdirs"] = ['./logs/' + runs]
 
     # network choice and settings
     if _config['network'].startswith('Res'):
@@ -277,13 +290,13 @@ def main(_config, _run, seed):
         assert 0 < feat < 7, "Feature Number from PWC have to be between 1 and 6"
         assert 0 < md, "md must be positive"
         model = LCCNet(input_size, use_feat_from=feat, md=md,
-                         use_reflectance=_config['use_reflectance'], dropout=_config['dropout'],
-                         Action_Func='leakyrelu', attention=False, res_num=18)
+                       use_reflectance=_config['use_reflectance'], dropout=_config['dropout'],
+                       Action_Func='leakyrelu', attention=False, res_num=18)
     else:
         raise TypeError("Network unknown")
     if _config['weights'] is not None:
         INFO(f"Loading weights from {_config['weights']}")
-        checkpoint = torch.load(_config['weights'], map_location='cpu')
+        checkpoint = torch.load(_config['weights'], map_location='cuda')
         saved_state_dict = checkpoint['state_dict']
         model.load_state_dict(saved_state_dict)
 
@@ -317,11 +330,11 @@ def main(_config, _run, seed):
 
     starting_epoch = _config['starting_epoch']
     if _config['weights'] is not None and _config['resume']:
-        checkpoint = torch.load(_config['weights'], map_location='cpu')
+        # checkpoint = torch.load(_config['weights'], map_location='cuda')
         opt_state_dict = checkpoint['optimizer']
-        optimizer.load_state_dict(opt_state_dict)
-        if starting_epoch != 0:
-            starting_epoch = checkpoint['epoch']
+        #optimizer.load_state_dict(opt_state_dict)
+       # if starting_epoch != 0:
+            #starting_epoch = checkpoint['epoch']
 
     # Allow mixed-precision if needed
     # model, optimizer = apex.amp.initialize(model, optimizer, opt_level=_config["precision"])
@@ -333,11 +346,15 @@ def main(_config, _run, seed):
     train_iter = 0
     val_iter = 0
     for epoch in range(starting_epoch, _config['epochs'] + 1):
+
         EPOCH = epoch
         INFO('This is %d-th epoch' % epoch)
         epoch_start_time = time.time()
         total_train_loss = 0
         local_loss = 0.
+        rot_loss = 0.
+        tran_loss = 0.
+        point_loss = 0.
         if _config['optimizer'] != 'adam':
             _run.log_scalar("LR", _config['BASE_LEARNING_RATE'] *
                             math.exp((1 - epoch) * 4e-2), epoch)
@@ -345,15 +362,14 @@ def main(_config, _run, seed):
                 param_group['lr'] = _config['BASE_LEARNING_RATE'] * \
                                     math.exp((1 - epoch) * 4e-2)
         else:
-            #scheduler.step(epoch%100)
+            # scheduler.step(epoch%100)
             _run.log_scalar("LR", scheduler.get_lr()[0])
-
 
         ## Training ##
         time_for_50ep = time.time()
         total_iter_start = time.time()
-        for batch_idx, sample in enumerate(TrainImgLoader):
-            #print(f'batch {batch_idx+1}/{len(TrainImgLoader)}', end='\r')
+        for batch_idx, sample in enumerate(tqdm(TrainImgLoader)):
+            # print(f'batch {batch_idx+1}/{len(TrainImgLoader)}', end='\r')tqdm
             start_time = time.time()
             lidar_input = []
             rgb_input = []
@@ -366,54 +382,6 @@ def main(_config, _run, seed):
             sample['tr_error'] = sample['tr_error'].cuda()
             sample['rot_error'] = sample['rot_error'].cuda()
 
-            start_preprocess = time.time()
-            # for idx in range(len(sample['rgb'])):
-            #     # ProjectPointCloud in RT-pose
-            #     real_shape = [sample['rgb'][idx].shape[1], sample['rgb'][idx].shape[2], sample['rgb'][idx].shape[0]]
-
-            #     sample['point_cloud'][idx] = sample['point_cloud'][idx].cuda() # 变换到相机坐标系下的激光雷达点云
-            #     pc_lidar = sample['point_cloud'][idx].clone()
-
-            #     if _config['max_depth'] < 80.:
-            #         pc_lidar = pc_lidar[:, pc_lidar[0, :] < _config['max_depth']].clone()
-
-            #     depth_gt, uv = lidar_project_depth(pc_lidar, sample['calib'][idx], real_shape) # image_shape
-            #     depth_gt /= _config['max_depth']
-
-            #     R = mathutils.Quaternion(sample['rot_error'][idx]).to_matrix()
-            #     R.resize_4x4()
-            #     T = mathutils.Matrix.Translation(sample['tr_error'][idx])
-            #     RT = T * R
-
-            #     pc_rotated = rotate_back(sample['point_cloud'][idx], RT) # Pc` = RT * Pc
-
-            #     if _config['max_depth'] < 80.:
-            #         pc_rotated = pc_rotated[:, pc_rotated[0, :] < _config['max_depth']].clone()
-
-            #     depth_img, uv = lidar_project_depth(pc_rotated, sample['calib'][idx], real_shape) # image_shape
-            #     depth_img /= _config['max_depth']
-
-            #     # PAD ONLY ON RIGHT AND BOTTOM SIDE
-            #     rgb = sample['rgb'][idx].cuda()
-            #     shape_pad = [0, 0, 0, 0]
-
-            #     shape_pad[3] = (img_shape[0] - rgb.shape[1])  # // 2
-            #     shape_pad[1] = (img_shape[1] - rgb.shape[2])  # // 2 + 1
-
-            #     print(f'shape_padL{shape_pad}')
-            #     rgb = F.pad(rgb, shape_pad)
-            #     depth_img = F.pad(depth_img, shape_pad)
-            #     depth_gt = F.pad(depth_gt, shape_pad)
-
-            #     rgb_input.append(rgb)
-            #     lidar_input.append(depth_img)
-            #     lidar_gt.append(depth_gt)
-            #     real_shape_input.append(real_shape)
-            #     shape_pad_input.append(shape_pad)
-            #     pc_rotated_input.append(pc_rotated)
-
-            # lidar_input = torch.stack(sample['lidar_input'])
-            # rgb_input = torch.stack(sample['rgb_input'])
             lidar_input = sample['lidar_input'].cuda()
             rgb_input = sample['rgb_input'].cuda()
             lidar_gt = sample['depth_gt']
@@ -425,7 +393,7 @@ def main(_config, _run, seed):
             rgb_input = F.interpolate(rgb_input, size=[256, 512], mode="bilinear")
             lidar_input = F.interpolate(lidar_input, size=[256, 512], mode="bilinear")
             end_preprocess = time.time()
-            loss, R_predicted,  T_predicted = train(model, optimizer, rgb_input, lidar_input,
+            loss, R_predicted, T_predicted = train(model, optimizer, rgb_input, lidar_input,
                                                    sample['tr_error'], sample['rot_error'],
                                                    loss_fn, sample['point_cloud'], _config['loss'])
             DEBUG(f'train method time cost:{time.time() - end_preprocess}')
@@ -436,55 +404,62 @@ def main(_config, _run, seed):
                 if loss[key].item() != loss[key].item():
                     raise ValueError("Loss {} is NaN".format(key))
             DEBUG(f'Nan time cost:{time.time() - total_iter_start}')
-            if batch_idx % _config['log_frequency'] == 0:
-                log_start = time.time()
-                show_idx = 0
-                # output image: The overlay image of the input rgb image
-                # and the projected lidar pointcloud depth image
-                rotated_point_cloud = pc_rotated_input[show_idx]
-                R_predicted = quat2mat(R_predicted[show_idx])
-                T_predicted = tvector2mat(T_predicted[show_idx])
-                RT_predicted = torch.mm(T_predicted, R_predicted)
-                rotated_point_cloud = rotate_forward(rotated_point_cloud.to(RT_predicted.device), RT_predicted)
-
-                depth_pred, uv = lidar_project_depth(rotated_point_cloud,
-                                                    sample['calib'][show_idx],
-                                                    real_shape_input[show_idx]) # or image_shape
-                depth_pred /= _config['max_depth']
-                depth_pred = F.pad(depth_pred, shape_pad_input[show_idx])
-
-                pred_show = overlay_imgs(rgb_show[show_idx], depth_pred.unsqueeze(0))
-                input_show = overlay_imgs(rgb_show[show_idx], lidar_show[show_idx].unsqueeze(0))
-                gt_show = overlay_imgs(rgb_show[show_idx], lidar_gt[show_idx].unsqueeze(0))
-
-                pred_show = torch.from_numpy(pred_show)
-                pred_show = pred_show.permute(2, 0, 1)
-                input_show = torch.from_numpy(input_show)
-                input_show = input_show.permute(2, 0, 1)
-                gt_show = torch.from_numpy(gt_show)
-                gt_show = gt_show.permute(2, 0, 1)
-
-                train_writer.add_image("input_proj_lidar", input_show, train_iter)
-                train_writer.add_image("gt_proj_lidar", gt_show, train_iter)
-                train_writer.add_image("pred_proj_lidar", pred_show, train_iter)
-
-                train_writer.add_scalar("Loss_Total", loss['total_loss'].item(), train_iter)
-                train_writer.add_scalar("Loss_Translation", loss['transl_loss'].item(), train_iter)
-                train_writer.add_scalar("Loss_Rotation", loss['rot_loss'].item(), train_iter)
-                if _config['loss'] == 'combined':
-                    train_writer.add_scalar("Loss_Point_clouds", loss['point_clouds_loss'].item(), train_iter)
-                DEBUG(f'log time cost{time.time() - log_start}')
+            # if batch_idx % _config['log_frequency'] == 0:
+            #     log_start = time.time()
+            #     show_idx = 0
+            #     # output image: The overlay image of the input rgb image
+            #     # and the projected lidar pointcloud depth image
+            #     rotated_point_cloud = pc_rotated_input[show_idx]
+            #     R_predicted = quat2mat(R_predicted[show_idx])
+            #     T_predicted = tvector2mat(T_predicted[show_idx])
+            #     RT_predicted = torch.mm(T_predicted, R_predicted)
+            #     rotated_point_cloud = rotate_forward(rotated_point_cloud.to(RT_predicted.device), RT_predicted)
+            #
+            #     depth_pred, uv = lidar_project_depth(rotated_point_cloud,
+            #                                          sample['calib'][show_idx],
+            #                                          real_shape_input[show_idx])  # or image_shape
+            #     depth_pred /= _config['max_depth']
+            #     depth_pred = F.pad(depth_pred, shape_pad_input[show_idx])
+            #
+            #     pred_show = overlay_imgs(rgb_show[show_idx], depth_pred.unsqueeze(0))
+            #     input_show = overlay_imgs(rgb_show[show_idx], lidar_show[show_idx].unsqueeze(0))
+            #     gt_show = overlay_imgs(rgb_show[show_idx], lidar_gt[show_idx].unsqueeze(0))
+            #
+            #     pred_show = torch.from_numpy(pred_show)
+            #     pred_show = pred_show.permute(2, 0, 1)
+            #     input_show = torch.from_numpy(input_show)
+            #     input_show = input_show.permute(2, 0, 1)
+            #     gt_show = torch.from_numpy(gt_show)
+            #     gt_show = gt_show.permute(2, 0, 1)
+            #
+            #     train_writer.add_image("input_proj_lidar", input_show, train_iter)
+            #     train_writer.add_image("gt_proj_lidar", gt_show, train_iter)
+            #     train_writer.add_image("pred_proj_lidar", pred_show, train_iter)
+            #
+            #     train_writer.add_scalar("Loss_Total", loss['total_loss'].item(), train_iter)
+            #     train_writer.add_scalar("Loss_Translation", loss['transl_loss'].item(), train_iter)
+            #     train_writer.add_scalar("Loss_Rotation", loss['rot_loss'].item(), train_iter)
+            #     # if _config['loss'] == 'combined':
+            #     #     train_writer.add_scalar("Loss_Point_clouds", loss['point_clouds_loss'].item(), train_iter)
+            #     DEBUG(f'log time cost{time.time() - log_start}')
             local_loss += loss['total_loss'].item()
+            tran_loss += loss['transl_loss'].item()
+            rot_loss += loss['rot_loss'].item()
+            point_loss += loss['point_clouds_loss'].item()
 
             if batch_idx % 50 == 0 and batch_idx != 0:
-
-                INFO(f'Iter {batch_idx}/{len(TrainImgLoader)} training loss = {local_loss/50:.3f}, '
-                      f'time = {(time.time() - start_time)/lidar_input.shape[0]:.4f}, '
-                      #f'time_preprocess = {(end_preprocess-start_preprocess)/lidar_input.shape[0]:.4f}, '
-                      f'time for 50 iter: {time.time()-time_for_50ep:.4f}')
+                INFO(f'Iter {batch_idx}/{len(TrainImgLoader)} training loss = {local_loss / 50:.3f}, '
+                     f'rot loss = {rot_loss / 50:.4f}, ' 
+                     f'tran loss = {tran_loss / 50:.4f}, '
+                     f'point loss = {point_loss / 50:.4f}, '  
+                     # f'time = {(time.time() - start_time) / lidar_input.shape[0]:.4f}, '
+                     f'time for 50 iter: {time.time() - time_for_50ep:.4f}')
                 time_for_50ep = time.time()
-                _run.log_scalar("Loss", local_loss/50, train_iter)
+                _run.log_scalar("Loss", local_loss / 50, train_iter)
                 local_loss = 0.
+                rot_loss = 0.
+                tran_loss = 0.
+                point_loss = 0.
             total_train_loss += loss['total_loss'].item() * len(sample['rgb'])
             train_iter += 1
             # total_iter += len(sample['rgb'])
@@ -501,8 +476,9 @@ def main(_config, _run, seed):
         total_val_r = 0.
 
         local_loss = 0.0
+
         for batch_idx, sample in enumerate(ValImgLoader):
-            #print(f'batch {batch_idx+1}/{len(TrainImgLoader)}', end='\r')
+            # print(f'batch {batch_idx+1}/{len(TrainImgLoader)}', end='\r')
             start_time = time.time()
             lidar_input = []
             rgb_input = []
@@ -514,18 +490,17 @@ def main(_config, _run, seed):
             # gt pose
             sample['tr_error'] = sample['tr_error'].cuda()
             sample['rot_error'] = sample['rot_error'].cuda()
-
             for idx in range(len(sample['rgb'])):
                 # ProjectPointCloud in RT-pose
                 real_shape = [sample['rgb'][idx].shape[1], sample['rgb'][idx].shape[2], sample['rgb'][idx].shape[0]]
 
-                sample['point_cloud'][idx] = sample['point_cloud'][idx].cuda() # 变换到相机坐标系下的激光雷达点云
+                sample['point_cloud'][idx] = sample['point_cloud'][idx].cuda()  # 变换到相机坐标系下的激光雷达点云
                 pc_lidar = sample['point_cloud'][idx].clone()
 
                 if _config['max_depth'] < 80.:
                     pc_lidar = pc_lidar[:, pc_lidar[0, :] < _config['max_depth']].clone()
 
-                depth_gt, uv = lidar_project_depth(pc_lidar, sample['calib'][idx], real_shape) # image_shape
+                depth_gt, uv = lidar_project_depth(pc_lidar, sample['calib'][idx], real_shape)  # image_shape
                 depth_gt /= _config['max_depth']
 
                 reflectance = None
@@ -537,12 +512,12 @@ def main(_config, _run, seed):
                 T = mathutils.Matrix.Translation(sample['tr_error'][idx])
                 RT = T * R
 
-                pc_rotated = rotate_back(sample['point_cloud'][idx], RT) # Pc` = RT * Pc
+                pc_rotated = rotate_back(sample['point_cloud'][idx], RT)  # Pc` = RT * Pc
 
                 if _config['max_depth'] < 80.:
                     pc_rotated = pc_rotated[:, pc_rotated[0, :] < _config['max_depth']].clone()
 
-                depth_img, uv = lidar_project_depth(pc_rotated, sample['calib'][idx], real_shape) # image_shape
+                depth_img, uv = lidar_project_depth(pc_rotated, sample['calib'][idx], real_shape)  # image_shape
                 depth_img /= _config['max_depth']
 
                 if _config['use_reflectance']:
@@ -588,9 +563,9 @@ def main(_config, _run, seed):
             rgb_input = F.interpolate(rgb_input, size=[256, 512], mode="bilinear")
             lidar_input = F.interpolate(lidar_input, size=[256, 512], mode="bilinear")
 
-            loss, trasl_e, rot_e, R_predicted,  T_predicted = val(model, rgb_input, lidar_input,
-                                                                  sample['tr_error'], sample['rot_error'],
-                                                                  loss_fn, sample['point_cloud'], _config['loss'])
+            loss, trasl_e, rot_e, R_predicted, T_predicted = val(model, rgb_input, lidar_input,
+                                                                 sample['tr_error'], sample['rot_error'],
+                                                                 loss_fn, sample['point_cloud'], _config['loss'])
 
             for key in loss.keys():
                 if loss[key].item() != loss[key].item():
@@ -607,8 +582,8 @@ def main(_config, _run, seed):
                 rotated_point_cloud = rotate_forward(rotated_point_cloud, RT_predicted)
 
                 depth_pred, uv = lidar_project_depth(rotated_point_cloud,
-                                                    sample['calib'][show_idx],
-                                                    real_shape_input[show_idx]) # or image_shape
+                                                     sample['calib'][show_idx],
+                                                     real_shape_input[show_idx])  # or image_shape
                 depth_pred /= _config['max_depth']
                 depth_pred = F.pad(depth_pred, shape_pad_input[show_idx])
 
@@ -630,17 +605,16 @@ def main(_config, _run, seed):
                 val_writer.add_scalar("Loss_Total", loss['total_loss'].item(), val_iter)
                 val_writer.add_scalar("Loss_Translation", loss['transl_loss'].item(), val_iter)
                 val_writer.add_scalar("Loss_Rotation", loss['rot_loss'].item(), val_iter)
-                if _config['loss'] == 'combined':
-                    val_writer.add_scalar("Loss_Point_clouds", loss['point_clouds_loss'].item(), val_iter)
-
+                # if _config['loss'] == 'combined':
+                #     val_writer.add_scalar("Loss_Point_clouds", loss['point_clouds_loss'].item(), val_iter)
 
             total_val_t += trasl_e
             total_val_r += rot_e
             local_loss += loss['total_loss'].item()
 
             if batch_idx % 50 == 0 and batch_idx != 0:
-                INFO('Iter %d val loss = %.3f , time = %.2f' % (batch_idx, local_loss/50.,
-                                                                  (time.time() - start_time)/lidar_input.shape[0]))
+                INFO('Iter %d val loss = %.3f , time = %.2f' % (batch_idx, local_loss / 50.,
+                                                                (time.time() - start_time) / lidar_input.shape[0]))
                 local_loss = 0.0
             total_val_loss += loss['total_loss'].item() * len(sample['rgb'])
             val_iter += 1
@@ -659,7 +633,7 @@ def main(_config, _run, seed):
         val_loss = total_val_loss / len(dataset_val)
         if val_loss < BEST_VAL_LOSS:
             BEST_VAL_LOSS = val_loss
-            #_run.result = BEST_VAL_LOSS
+            # _run.result = BEST_VAL_LOSS
             if _config['rescale_transl'] > 0:
                 _run.result = total_val_t / len(dataset_val)
             else:
@@ -669,12 +643,24 @@ def main(_config, _run, seed):
                 'config': _config,
                 'epoch': epoch,
                 # 'state_dict': model.state_dict(), # single gpu
-                'state_dict': model.module.state_dict(), # multi gpu
+                'state_dict': model.module.state_dict(),  # multi gpu
                 'optimizer': optimizer.state_dict(),
                 'train_loss': total_train_loss / len(dataset_train),
                 'val_loss': total_val_loss / len(dataset_val),
-            }, savefilename)
+            }, savefilename, _use_new_zipfile_serialization=True)
+
+            savefilename2 = f'/root/autodl-tmp/LCCNet/final_model.tar'
+            torch.save({
+                'config': _config,
+                'epoch': epoch,
+                # 'state_dict': model.state_dict(), # single gpu
+                'state_dict': model.module.state_dict(),  # multi gpu
+                'optimizer': optimizer.state_dict(),
+                'train_loss': total_train_loss / len(dataset_train),
+                'val_loss': total_val_loss / len(dataset_val),
+            }, savefilename2, _use_new_zipfile_serialization=True)
             INFO(f'Model saved as {savefilename}')
+            INFO(f'Model saved as {savefilename2}')
             if old_save_filename is not None:
                 if os.path.exists(old_save_filename):
                     os.remove(old_save_filename)

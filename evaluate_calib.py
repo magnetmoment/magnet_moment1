@@ -58,13 +58,13 @@ plt_size = 10.5
 ex = Experiment("LCCNet-evaluate-iterative")
 ex.captured_out_filter = apply_backspaces_and_linefeeds
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 # noinspection PyUnusedLocal
 @ex.config
 def config():
     dataset = 'kitti/odom'
-    data_folder = '/data/kitti_odometry/dataset'
+    data_folder = '/root/autodl-tmp/semantic-kitti/dataset/SemanticKITTI'
     test_sequence = 0
     use_prev_output = False
     max_t = 1.5
@@ -83,19 +83,16 @@ def config():
     save_log = False
     dropout = 0.0
     max_depth = 80.
-    iterative_method = 'multi_range' # ['multi_range', 'single_range', 'single']
-    output = '../output'
+    iterative_method = 'single'  # ['multi_range', 'single_range', 'single']
+    output = '/root/autodl-tmp/LCCNet/output'
     save_image = False
     outlier_filter = True
     outlier_filter_th = 10
-    out_fig_lg = 'EN' # [EN, CN]
+    out_fig_lg = 'EN'  # [EN, CN]
+
 
 weights = [
-   './pretrained/kitti_iter1.tar',
-   './pretrained/kitti_iter2.tar',
-   './pretrained/kitti_iter3.tar',
-   './pretrained/kitti_iter4.tar',
-   './pretrained/kitti_iter5.tar',
+   '/root/autodl-tmp/LCCNet/final_model.tar'
 ]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -165,8 +162,8 @@ def main(_config, seed):
         if isinstance(_config['test_sequence'], int):
             _config['test_sequence'] = f"{_config['test_sequence']:02d}"
         dataset_val = dataset_class(_config['data_folder'], max_r=_config['max_r'], max_t=_config['max_t'],
-                                split='test', use_reflectance=_config['use_reflectance']
-                                ,config=_config, img_shape = img_shape)
+                                    split='test', use_reflectance=_config['use_reflectance']
+                                    , config=_config, img_shape=img_shape)
 
     np.random.seed(seed)
     torch.random.manual_seed(seed)
@@ -174,7 +171,7 @@ def main(_config, seed):
     def init_fn(x):
         return _init_fn(x, seed)
 
-    num_worker = 0
+    num_worker = 8
     batch_size = 1
 
     TestImgLoader = torch.utils.data.DataLoader(dataset=dataset_val,
@@ -417,8 +414,8 @@ def main(_config, seed):
 
         # the initial calibration errors before sensor calibration
         RT1 = RTs[0]
-        mis_calib = torch.stack(sample['initial_RT'])[1:]
-        mis_calib_list.append(mis_calib)
+        # mis_calib = torch.stack(sample['initial_RT'])[1:]
+        # mis_calib_list.append(mis_calib)
 
         T_composed = RT1[:3, 3]
         R_composed = quaternion_from_matrix(RT1)
@@ -535,7 +532,7 @@ def main(_config, seed):
     # Pitch（俯仰）：欧拉角向量的x轴
     # Roll（翻滚）： 欧拉角向量的z轴
     # mis_calib_input[transl_x, transl_y, transl_z, rotx, roty, rotz] Nx6
-    mis_calib_input = torch.stack(mis_calib_list)[:, :, 0]
+    # mis_calib_input = torch.stack(mis_calib_list)[:, :, 0]
 
     if _config['save_log']:
         log_file.close()
@@ -638,143 +635,142 @@ def main(_config, seed):
     # translation error
     # fig = plt.figure(figsize=(6, 3))  # 设置图大小 figsize=(6,3)
     # plt.title('Calibration Translation Error')
-    plot_x = np.zeros((mis_calib_input.shape[0], 2))
-    plot_x[:, 0] = mis_calib_input[:, 0].cpu().numpy()
-    plot_x[:, 1] = errors_t2[-1][:, 0].cpu().numpy()
-    plot_x = plot_x[np.lexsort(plot_x[:, ::-1].T)]
-
-    plot_y = np.zeros((mis_calib_input.shape[0], 2))
-    plot_y[:, 0] = mis_calib_input[:, 1].cpu().numpy()
-    plot_y[:, 1] = errors_t2[-1][:, 1].cpu().numpy()
-    plot_y = plot_y[np.lexsort(plot_y[:, ::-1].T)]
-
-    plot_z = np.zeros((mis_calib_input.shape[0], 2))
-    plot_z[:, 0] = mis_calib_input[:, 2].cpu().numpy()
-    plot_z[:, 1] = errors_t2[-1][:, 2].cpu().numpy()
-    plot_z = plot_z[np.lexsort(plot_z[:, ::-1].T)]
-
-    N_interval = plot_x.shape[0] // N
-    plot_x = plot_x[::N_interval]
-    plot_y = plot_y[::N_interval]
-    plot_z = plot_z[::N_interval]
-
-    plt.plot(plot_x[:, 0], plot_x[:, 1], c='red', label='X')
-    plt.plot(plot_y[:, 0], plot_y[:, 1], c='blue', label='Y')
-    plt.plot(plot_z[:, 0], plot_z[:, 1], c='green', label='Z')
-    # plt.legend(loc='best')
-
-    if _config['out_fig_lg'] == 'EN':
-        plt.xlabel('Miscalibration (m)', font_EN)
-        plt.ylabel('Absolute Error (m)', font_EN)
-        plt.legend(loc='best', prop=font_EN)
-    elif _config['out_fig_lg'] == 'CN':
-        plt.xlabel('初始标定外参偏差/米', font_CN)
-        plt.ylabel('绝对误差/米', font_CN)
-        plt.legend(loc='best', prop=font_CN)
-
-    plt.xticks(fontproperties='Times New Roman', size=plt_size)
-    plt.yticks(fontproperties='Times New Roman', size=plt_size)
-
-    plt.savefig(os.path.join(results_path, 'xyz_plot.png'))
-    plt.close('all')
-
-    errors_t = errors_t[-1].numpy()
-    errors_t = np.sort(errors_t, axis=0)[:-10] # 去掉一些异常值
-    # plt.title('Calibration Translation Error Distribution')
-    plt.hist(errors_t / 100, bins=50)
-    # ax = plt.gca()
-    # ax.set_xlabel('Absolute Translation Error (m)')
-    # ax.set_ylabel('Number of instances')
-    # ax.set_xticks([0.00, 0.25, 0.00, 0.25, 0.50])
-
-    if _config['out_fig_lg'] == 'EN':
-        plt.xlabel('Absolute Translation Error (m)', font_EN)
-        plt.ylabel('Number of instances', font_EN)
-    elif _config['out_fig_lg'] == 'CN':
-        plt.xlabel('绝对平移误差/米', font_CN)
-        plt.ylabel('实验序列数目/个', font_CN)
-    plt.xticks(fontproperties='Times New Roman', size=plt_size)
-    plt.yticks(fontproperties='Times New Roman', size=plt_size)
-
-    plt.savefig(os.path.join(results_path, 'translation_error_distribution.png'))
-    plt.close('all')
-
-    # rotation error
-    # fig = plt.figure(figsize=(6, 3))  # 设置图大小 figsize=(6,3)
-    # plt.title('Calibration Rotation Error')
-    plot_pitch = np.zeros((mis_calib_input.shape[0], 2))
-    plot_pitch[:, 0] = mis_calib_input[:, 3].cpu().numpy() * (180.0 / 3.141592)
-    plot_pitch[:, 1] = errors_rpy[-1][:, 1].cpu().numpy()
-    plot_pitch = plot_pitch[np.lexsort(plot_pitch[:, ::-1].T)]
-
-    plot_yaw = np.zeros((mis_calib_input.shape[0], 2))
-    plot_yaw[:, 0] = mis_calib_input[:, 4].cpu().numpy() * (180.0 / 3.141592)
-    plot_yaw[:, 1] = errors_rpy[-1][:, 2].cpu().numpy()
-    plot_yaw = plot_yaw[np.lexsort(plot_yaw[:, ::-1].T)]
-
-    plot_roll = np.zeros((mis_calib_input.shape[0], 2))
-    plot_roll[:, 0] = mis_calib_input[:, 5].cpu().numpy() * (180.0 / 3.141592)
-    plot_roll[:, 1] = errors_rpy[-1][:, 0].cpu().numpy()
-    plot_roll = plot_roll[np.lexsort(plot_roll[:, ::-1].T)]
-
-    N_interval = plot_roll.shape[0] // N
-    plot_pitch = plot_pitch[::N_interval]
-    plot_yaw = plot_yaw[::N_interval]
-    plot_roll = plot_roll[::N_interval]
-
-    # Yaw（偏航）：欧拉角向量的y轴
-    # Pitch（俯仰）：欧拉角向量的x轴
-    # Roll（翻滚）： 欧拉角向量的z轴
-
-    if _config['out_fig_lg'] == 'EN':
-        plt.plot(plot_yaw[:, 0], plot_yaw[:, 1], c='red', label='Yaw(Y)')
-        plt.plot(plot_pitch[:, 0], plot_pitch[:, 1], c='blue', label='Pitch(X)')
-        plt.plot(plot_roll[:, 0], plot_roll[:, 1], c='green', label='Roll(Z)')
-        plt.xlabel('Miscalibration (degree)', font_EN)
-        plt.ylabel('Absolute Error (degree)', font_EN)
-        plt.legend(loc='best', prop=font_EN)
-    elif _config['out_fig_lg'] == 'CN':
-        plt.plot(plot_yaw[:, 0], plot_yaw[:, 1], c='red', label='偏航角')
-        plt.plot(plot_pitch[:, 0], plot_pitch[:, 1], c='blue', label='俯仰角')
-        plt.plot(plot_roll[:, 0], plot_roll[:, 1], c='green', label='翻滚角')
-        plt.xlabel('初始标定外参偏差/度', font_CN)
-        plt.ylabel('绝对误差/度', font_CN)
-        plt.legend(loc='best', prop=font_CN)
-
-    plt.xticks(fontproperties='Times New Roman', size=plt_size)
-    plt.yticks(fontproperties='Times New Roman', size=plt_size)
-    plt.savefig(os.path.join(results_path, 'rpy_plot.png'))
-    plt.close('all')
-
-    errors_r = errors_r[-1].numpy()
-    errors_r = np.sort(errors_r, axis=0)[:-10] # 去掉一些异常值
-    # np.savetxt('rot_error.txt', arr_, fmt='%0.8f')
-    # print('max rotation_error: {}'.format(max(errors_r)))
-    # plt.title('Calibration Rotation Error Distribution')
-    plt.hist(errors_r, bins=50)
-    #plt.xlim([0, 1.5])  # x轴边界
-    #plt.xticks([0.0, 0.3, 0.6, 0.9, 1.2, 1.5])  # 设置x刻度
-    # ax = plt.gca()
-
-    if _config['out_fig_lg'] == 'EN':
-        plt.xlabel('Absolute Rotation Error (degree)', font_EN)
-        plt.ylabel('Number of instances', font_EN)
-    elif _config['out_fig_lg'] == 'CN':
-        plt.xlabel('绝对旋转误差/度', font_CN)
-        plt.ylabel('实验序列数目/个', font_CN)
-    plt.xticks(fontproperties='Times New Roman', size=plt_size)
-    plt.yticks(fontproperties='Times New Roman', size=plt_size)
-    plt.savefig(os.path.join(results_path, 'rotation_error_distribution.png'))
-    plt.close('all')
-
-
-    if _config["save_name"] is not None:
-        torch.save(torch.stack(errors_t).cpu().numpy(), f'./results_for_paper/{_config["save_name"]}_errors_t')
-        torch.save(torch.stack(errors_r).cpu().numpy(), f'./results_for_paper/{_config["save_name"]}_errors_r')
-        torch.save(torch.stack(errors_t2).cpu().numpy(), f'./results_for_paper/{_config["save_name"]}_errors_t2')
-        torch.save(torch.stack(errors_rpy).cpu().numpy(), f'./results_for_paper/{_config["save_name"]}_errors_rpy')
-
-    avg_time = total_time / len(TestImgLoader)
-    print("average runing time on {} iteration: {} s".format(len(weights), avg_time))
-    print("End!")
-
+    # plot_x = np.zeros((mis_calib_input.shape[0], 2))
+    # plot_x[:, 0] = mis_calib_input[:, 0].cpu().numpy()
+    # plot_x[:, 1] = errors_t2[-1][:, 0].cpu().numpy()
+    # plot_x = plot_x[np.lexsort(plot_x[:, ::-1].T)]
+    #
+    # plot_y = np.zeros((mis_calib_input.shape[0], 2))
+    # plot_y[:, 0] = mis_calib_input[:, 1].cpu().numpy()
+    # plot_y[:, 1] = errors_t2[-1][:, 1].cpu().numpy()
+    # plot_y = plot_y[np.lexsort(plot_y[:, ::-1].T)]
+    #
+    # plot_z = np.zeros((mis_calib_input.shape[0], 2))
+    # plot_z[:, 0] = mis_calib_input[:, 2].cpu().numpy()
+    # plot_z[:, 1] = errors_t2[-1][:, 2].cpu().numpy()
+    # plot_z = plot_z[np.lexsort(plot_z[:, ::-1].T)]
+    #
+    # N_interval = plot_x.shape[0] // N
+    # plot_x = plot_x[::N_interval]
+    # plot_y = plot_y[::N_interval]
+    # plot_z = plot_z[::N_interval]
+    #
+    # plt.plot(plot_x[:, 0], plot_x[:, 1], c='red', label='X')
+    # plt.plot(plot_y[:, 0], plot_y[:, 1], c='blue', label='Y')
+    # plt.plot(plot_z[:, 0], plot_z[:, 1], c='green', label='Z')
+    # # plt.legend(loc='best')
+    #
+    # if _config['out_fig_lg'] == 'EN':
+    #     plt.xlabel('Miscalibration (m)', font_EN)
+    #     plt.ylabel('Absolute Error (m)', font_EN)
+    #     plt.legend(loc='best', prop=font_EN)
+    # elif _config['out_fig_lg'] == 'CN':
+    #     plt.xlabel('初始标定外参偏差/米', font_CN)
+    #     plt.ylabel('绝对误差/米', font_CN)
+    #     plt.legend(loc='best', prop=font_CN)
+    #
+    # plt.xticks(fontproperties='Times New Roman', size=plt_size)
+    # plt.yticks(fontproperties='Times New Roman', size=plt_size)
+    #
+    # plt.savefig(os.path.join(results_path, 'xyz_plot.png'))
+    # plt.close('all')
+    #
+    # errors_t = errors_t[-1].numpy()
+    # errors_t = np.sort(errors_t, axis=0)[:-10] # 去掉一些异常值
+    # # plt.title('Calibration Translation Error Distribution')
+    # plt.hist(errors_t / 100, bins=50)
+    # # ax = plt.gca()
+    # # ax.set_xlabel('Absolute Translation Error (m)')
+    # # ax.set_ylabel('Number of instances')
+    # # ax.set_xticks([0.00, 0.25, 0.00, 0.25, 0.50])
+    #
+    # if _config['out_fig_lg'] == 'EN':
+    #     plt.xlabel('Absolute Translation Error (m)', font_EN)
+    #     plt.ylabel('Number of instances', font_EN)
+    # elif _config['out_fig_lg'] == 'CN':
+    #     plt.xlabel('绝对平移误差/米', font_CN)
+    #     plt.ylabel('实验序列数目/个', font_CN)
+    # plt.xticks(fontproperties='Times New Roman', size=plt_size)
+    # plt.yticks(fontproperties='Times New Roman', size=plt_size)
+    #
+    # plt.savefig(os.path.join(results_path, 'translation_error_distribution.png'))
+    # plt.close('all')
+    #
+    # # rotation error
+    # # fig = plt.figure(figsize=(6, 3))  # 设置图大小 figsize=(6,3)
+    # # plt.title('Calibration Rotation Error')
+    # plot_pitch = np.zeros((mis_calib_input.shape[0], 2))
+    # plot_pitch[:, 0] = mis_calib_input[:, 3].cpu().numpy() * (180.0 / 3.141592)
+    # plot_pitch[:, 1] = errors_rpy[-1][:, 1].cpu().numpy()
+    # plot_pitch = plot_pitch[np.lexsort(plot_pitch[:, ::-1].T)]
+    #
+    # plot_yaw = np.zeros((mis_calib_input.shape[0], 2))
+    # plot_yaw[:, 0] = mis_calib_input[:, 4].cpu().numpy() * (180.0 / 3.141592)
+    # plot_yaw[:, 1] = errors_rpy[-1][:, 2].cpu().numpy()
+    # plot_yaw = plot_yaw[np.lexsort(plot_yaw[:, ::-1].T)]
+    #
+    # plot_roll = np.zeros((mis_calib_input.shape[0], 2))
+    # plot_roll[:, 0] = mis_calib_input[:, 5].cpu().numpy() * (180.0 / 3.141592)
+    # plot_roll[:, 1] = errors_rpy[-1][:, 0].cpu().numpy()
+    # plot_roll = plot_roll[np.lexsort(plot_roll[:, ::-1].T)]
+    #
+    # N_interval = plot_roll.shape[0] // N
+    # plot_pitch = plot_pitch[::N_interval]
+    # plot_yaw = plot_yaw[::N_interval]
+    # plot_roll = plot_roll[::N_interval]
+    #
+    # # Yaw（偏航）：欧拉角向量的y轴
+    # # Pitch（俯仰）：欧拉角向量的x轴
+    # # Roll（翻滚）： 欧拉角向量的z轴
+    #
+    # if _config['out_fig_lg'] == 'EN':
+    #     plt.plot(plot_yaw[:, 0], plot_yaw[:, 1], c='red', label='Yaw(Y)')
+    #     plt.plot(plot_pitch[:, 0], plot_pitch[:, 1], c='blue', label='Pitch(X)')
+    #     plt.plot(plot_roll[:, 0], plot_roll[:, 1], c='green', label='Roll(Z)')
+    #     plt.xlabel('Miscalibration (degree)', font_EN)
+    #     plt.ylabel('Absolute Error (degree)', font_EN)
+    #     plt.legend(loc='best', prop=font_EN)
+    # elif _config['out_fig_lg'] == 'CN':
+    #     plt.plot(plot_yaw[:, 0], plot_yaw[:, 1], c='red', label='偏航角')
+    #     plt.plot(plot_pitch[:, 0], plot_pitch[:, 1], c='blue', label='俯仰角')
+    #     plt.plot(plot_roll[:, 0], plot_roll[:, 1], c='green', label='翻滚角')
+    #     plt.xlabel('初始标定外参偏差/度', font_CN)
+    #     plt.ylabel('绝对误差/度', font_CN)
+    #     plt.legend(loc='best', prop=font_CN)
+    #
+    # plt.xticks(fontproperties='Times New Roman', size=plt_size)
+    # plt.yticks(fontproperties='Times New Roman', size=plt_size)
+    # plt.savefig(os.path.join(results_path, 'rpy_plot.png'))
+    # plt.close('all')
+    #
+    # errors_r = errors_r[-1].numpy()
+    # errors_r = np.sort(errors_r, axis=0)[:-10] # 去掉一些异常值
+    # # np.savetxt('rot_error.txt', arr_, fmt='%0.8f')
+    # # print('max rotation_error: {}'.format(max(errors_r)))
+    # # plt.title('Calibration Rotation Error Distribution')
+    # plt.hist(errors_r, bins=50)
+    # #plt.xlim([0, 1.5])  # x轴边界
+    # #plt.xticks([0.0, 0.3, 0.6, 0.9, 1.2, 1.5])  # 设置x刻度
+    # # ax = plt.gca()
+    #
+    # if _config['out_fig_lg'] == 'EN':
+    #     plt.xlabel('Absolute Rotation Error (degree)', font_EN)
+    #     plt.ylabel('Number of instances', font_EN)
+    # elif _config['out_fig_lg'] == 'CN':
+    #     plt.xlabel('绝对旋转误差/度', font_CN)
+    #     plt.ylabel('实验序列数目/个', font_CN)
+    # plt.xticks(fontproperties='Times New Roman', size=plt_size)
+    # plt.yticks(fontproperties='Times New Roman', size=plt_size)
+    # plt.savefig(os.path.join(results_path, 'rotation_error_distribution.png'))
+    # plt.close('all')
+    #
+    #
+    # if _config["save_name"] is not None:
+    #     torch.save(torch.stack(errors_t).cpu().numpy(), f'./results_for_paper/{_config["save_name"]}_errors_t')
+    #     torch.save(torch.stack(errors_r).cpu().numpy(), f'./results_for_paper/{_config["save_name"]}_errors_r')
+    #     torch.save(torch.stack(errors_t2).cpu().numpy(), f'./results_for_paper/{_config["save_name"]}_errors_t2')
+    #     torch.save(torch.stack(errors_rpy).cpu().numpy(), f'./results_for_paper/{_config["save_name"]}_errors_rpy')
+    #
+    # avg_time = total_time / len(TestImgLoader)
+    # print("average runing time on {} iteration: {} s".format(len(weights), avg_time))
+    # print("End!")

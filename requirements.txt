@@ -1,5 +1,5 @@
 scikit_image
-git+https://gitlab.com/m1lhaus/blender-mathutils.git
+#git+https://gitlab.com/m1lhaus/blender-mathutils.git
 tqdm==4.19.9
 pandas
 h5py
