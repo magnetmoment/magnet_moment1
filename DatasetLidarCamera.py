@@ -10,31 +10,28 @@
 # based on github.com/cattaneod/CMRNet/blob/master/DatasetVisibilityKitti.py
 
 import csv
-from http.client import PRECONDITION_REQUIRED
-import os
 from math import radians
-import cv2
 
-import h5py
 import mathutils
 import numpy as np
 import pandas as pd
+import pykitti
 import torch
+import torch.nn.functional as F
 import torchvision.transforms.functional as TTF
 from PIL import Image
+from pykitti import odometry
 from torch.utils.data import Dataset
 from torchvision import transforms
-import torch.nn.functional as F
-import time
 
-from utils import invert_pose, rotate_forward, quaternion_from_matrix, rotate_back
-from pykitti import odometry
-import pykitti
+from utils import invert_pose, rotate_forward, rotate_back
 
 torch.set_num_threads(1)
 import os
+
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
+
 
 def read_calib_file(filepath):
     """Read in a calibration file and parse into a dictionary."""
@@ -71,12 +68,12 @@ def lidar_project_depth(pc_rotated, cam_calib, img_shape):
             pcl_uv[:, 1] < img_shape[0]) & (pcl_z > 0)
     pcl_uv = pcl_uv[mask]
     pcl_z = pcl_z[mask]
-    pcl_xy = pc_rotated[0:2, mask].transpose(1,0)
-    pcl_xyz = np.concatenate([pcl_xy, pcl_z[:,None]], axis = 1)
-    pcl_uv = pcl_uv.astype(np.uint32)
+    pcl_xy = pc_rotated[0:2, mask].transpose(1, 0)
+    pcl_xyz = np.concatenate([pcl_xy, pcl_z[:, None]], axis=1)
+    pcl_uv2 = pcl_uv.astype(np.uint32)
     pcl_z = pcl_z.reshape(-1, 1)
     depth_img = np.zeros((img_shape[0], img_shape[1], 1))
-    depth_img[pcl_uv[:, 1], pcl_uv[:, 0]] = pcl_z
+    depth_img[pcl_uv2[:, 1], pcl_uv2[:, 0]] = pcl_z
     depth_img = torch.from_numpy(depth_img.astype(np.float32))
     depth_img = depth_img
     depth_img = depth_img.permute(2, 0, 1)
@@ -269,7 +266,7 @@ class DatasetLidarCameraKittiOdometry(Dataset):
 
         img = Image.open(img_path)
         # img = cv2.imread(img_path)
-        img_rotation = 0.
+        img_rotation = 10.
         # if self.split == 'train':
         #     img_rotation = np.random.uniform(-5, 5)
         try:
@@ -325,7 +322,7 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         if self._config['max_depth'] < 80.:
             pc_lidar = pc_lidar[:, pc_lidar[0, :] < self._config['max_depth']].clone()
 
-        depth_gt, uv, pcl_xyz = lidar_project_depth(pc_lidar, calib, real_shape)  # image_shape
+        depth_gt, uv_gt, pcl_xyz, mask = lidar_project_depth(pc_lidar, calib, real_shape)  # image_shape
         depth_gt /= self._config['max_depth']
 
         RR = mathutils.Quaternion(R).to_matrix()
@@ -353,23 +350,26 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         depth_img = F.pad(depth_img, shape_pad)
         depth_gt = F.pad(depth_gt, shape_pad)
 
-        uv2 = np.zeros((self.max_points, 2), dtype = np.int64)
-        pcl_xyz2 = np.zeros((self.max_points, 3), dtype=np.int64)
-        uv2[0 : uv.shape[0], :] = uv
-        pcl_xyz2[0 : uv.shape[0], :] = pcl_xyz
-        #16 32, 32 64, 64 128, 128 256,
+        uv_gt2 = np.zeros((self.max_points, 2), dtype=np.float32)
+        uv2 = np.zeros((self.max_points, 2), dtype=np.float32)
+        pcl_xyz2 = np.zeros((self.max_points, 3), dtype=np.float32)
+        uv_gt2[0: uv_gt.shape[0], :] = uv_gt
+        uv2[0: uv.shape[0], :] = uv
+        pcl_xyz2[0: uv.shape[0], :] = pcl_xyz
+        # 16 32, 32 64, 64 128, 128 256,
         if self.split == 'test':
             sample = {'rgb': img, 'point_cloud': pc_in, 'calib': calib,
                       'tr_error': T, 'rot_error': R, 'seq': int(seq), 'img_path': img_path,
                       'rgb_name': rgb_name + '.png', 'item': item, 'extrin': RT,
-                      'initial_RT': initial_RT, 'uv': uv2 'mask': mask,'pcl_xyz' : pcl_xyz2}
+                      'initial_RT': initial_RT, 'uv': uv2, 'uv_gt': uv_gt2,
+                      'mask': mask, 'pcl_xyz': pcl_xyz2}
         else:
             sample = {'rgb': img, 'point_cloud': pc_in, 'calib': calib,
                       'tr_error': T, 'rot_error': R, 'seq': int(seq),
                       'rgb_name': rgb_name, 'item': item, 'extrin': RT, 'lidar_input': depth_img,
                       'rgb_input': rgb, 'pc_rotated': pc_rotated, 'shape_pad': shape_pad,
-                      'real_shape': real_shape, 'depth_gt': depth_gt, 'uv': uv2,
-                      'mask':mask, 'pcl_xyz':pcl_xyz2}
+                      'real_shape': real_shape, 'depth_gt': depth_gt, 'uv': uv2, 'uv_gt': uv_gt2,
+                      'mask': mask, 'pcl_xyz': pcl_xyz2}
 
         return sample
 

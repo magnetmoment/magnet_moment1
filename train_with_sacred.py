@@ -57,7 +57,7 @@ def config():
     # data_folder = '/home/wangshuo/Datasets/KITTI/odometry/data_odometry_full/'
     dataset = 'kitti/odom'  # 'kitti/raw'
     data_folder = '/root/autodl-tmp/semantic-kitti/dataset/SemanticKITTI'
-    # data_folder = '/media/hust1105/8AAAE75DAAE743F3/dzp/semantic-kitti/dataset/SemanticKITTI'
+    # data_folder = '/media/hxz/Data21/kitti/semantic-kitti/dataset/SemanticKITTI'
     use_reflectance = False
     val_sequence = 0
     epochs = 50
@@ -65,12 +65,12 @@ def config():
     loss = 'combined'
     max_t = 1.5  # 1.5, 1.0,  0.5,  0.2,  0.1
     max_r = 20.0  # 20.0, 10.0, 5.0,  2.0,  1.0
-    batch_size = 32  # 120
+    batch_size = 8  # 120
     num_worker = 10
     network = 'Res_f1'
     optimizer = 'adam'
     resume = True
-    weights ='/root/autodl-tmp/LCCNet/final_model1.tar'
+    weights = None#'/root/autodl-tmp/LCCNet/final_model1.tar'
     rescale_rot = 1.0
     rescale_transl = 2.0
     precision = "O0"
@@ -130,11 +130,12 @@ def lidar_project_depth(pc_rotated, cam_calib, img_shape):
 
 # CCN training
 @ex.capture
-def train(model, optimizer, rgb_img, refl_img, target_transl, target_rot, loss_fn, point_clouds, loss):
+def train(model, optimizer, rgb_img, refl_img, target_transl, target_rot,
+          uv, pcl_xyz, mask, loss_fn, point_clouds, loss, K):
     model.train()
     optimizer.zero_grad()
     # Run model
-    transl_err, rot_err = model(rgb_img, refl_img)
+    transl_err, rot_err = model(rgb_img, refl_img, uv, pcl_xyz, mask, K)#BCWH   B C   W H   B N 2   B N 3   B N 1
 
     model_end = time.time()
     if loss == 'points_distance' or loss == 'combined':
@@ -393,9 +394,12 @@ def main(_config, _run, seed):
             rgb_input = F.interpolate(rgb_input, size=[256, 512], mode="bilinear")
             lidar_input = F.interpolate(lidar_input, size=[256, 512], mode="bilinear")
             end_preprocess = time.time()
+
             loss, R_predicted, T_predicted = train(model, optimizer, rgb_input, lidar_input,
                                                    sample['tr_error'], sample['rot_error'],
-                                                   loss_fn, sample['point_cloud'], _config['loss'])
+                                                   sample['uv'], sample['pcl_xyz'], sample['mask'],
+                                                   loss_fn, sample['point_cloud'], _config['loss'],sample['calib'])
+
             DEBUG(f'train method time cost:{time.time() - end_preprocess}')
             DEBUG(f'end train time cost{time.time() - start_time}')
             DEBUG(f'end iter time cost{time.time() - total_iter_start}')
@@ -404,44 +408,7 @@ def main(_config, _run, seed):
                 if loss[key].item() != loss[key].item():
                     raise ValueError("Loss {} is NaN".format(key))
             DEBUG(f'Nan time cost:{time.time() - total_iter_start}')
-            # if batch_idx % _config['log_frequency'] == 0:
-            #     log_start = time.time()
-            #     show_idx = 0
-            #     # output image: The overlay image of the input rgb image
-            #     # and the projected lidar pointcloud depth image
-            #     rotated_point_cloud = pc_rotated_input[show_idx]
-            #     R_predicted = quat2mat(R_predicted[show_idx])
-            #     T_predicted = tvector2mat(T_predicted[show_idx])
-            #     RT_predicted = torch.mm(T_predicted, R_predicted)
-            #     rotated_point_cloud = rotate_forward(rotated_point_cloud.to(RT_predicted.device), RT_predicted)
-            #
-            #     depth_pred, uv = lidar_project_depth(rotated_point_cloud,
-            #                                          sample['calib'][show_idx],
-            #                                          real_shape_input[show_idx])  # or image_shape
-            #     depth_pred /= _config['max_depth']
-            #     depth_pred = F.pad(depth_pred, shape_pad_input[show_idx])
-            #
-            #     pred_show = overlay_imgs(rgb_show[show_idx], depth_pred.unsqueeze(0))
-            #     input_show = overlay_imgs(rgb_show[show_idx], lidar_show[show_idx].unsqueeze(0))
-            #     gt_show = overlay_imgs(rgb_show[show_idx], lidar_gt[show_idx].unsqueeze(0))
-            #
-            #     pred_show = torch.from_numpy(pred_show)
-            #     pred_show = pred_show.permute(2, 0, 1)
-            #     input_show = torch.from_numpy(input_show)
-            #     input_show = input_show.permute(2, 0, 1)
-            #     gt_show = torch.from_numpy(gt_show)
-            #     gt_show = gt_show.permute(2, 0, 1)
-            #
-            #     train_writer.add_image("input_proj_lidar", input_show, train_iter)
-            #     train_writer.add_image("gt_proj_lidar", gt_show, train_iter)
-            #     train_writer.add_image("pred_proj_lidar", pred_show, train_iter)
-            #
-            #     train_writer.add_scalar("Loss_Total", loss['total_loss'].item(), train_iter)
-            #     train_writer.add_scalar("Loss_Translation", loss['transl_loss'].item(), train_iter)
-            #     train_writer.add_scalar("Loss_Rotation", loss['rot_loss'].item(), train_iter)
-            #     # if _config['loss'] == 'combined':
-            #     #     train_writer.add_scalar("Loss_Point_clouds", loss['point_clouds_loss'].item(), train_iter)
-            #     DEBUG(f'log time cost{time.time() - log_start}')
+
             local_loss += loss['total_loss'].item()
             tran_loss += loss['transl_loss'].item()
             rot_loss += loss['rot_loss'].item()
