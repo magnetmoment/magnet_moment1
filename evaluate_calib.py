@@ -163,7 +163,7 @@ def main(_config, seed):
             _config['test_sequence'] = f"{_config['test_sequence']:02d}"
         dataset_val = dataset_class(_config['data_folder'], max_r=_config['max_r'], max_t=_config['max_t'],
                                     split='test', use_reflectance=_config['use_reflectance']
-                                    , config=_config, img_shape=img_shape)
+                                    ,config=_config, img_shape=img_shape)
 
     np.random.seed(seed)
     torch.random.manual_seed(seed)

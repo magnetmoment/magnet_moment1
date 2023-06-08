@@ -16,7 +16,7 @@ import torch
 from torch import nn as nn
 
 from logger import *
-from quaternion_distances import quaternion_distance
+from quaternion_distances import quaternion_distance,matrix_to_quaternion
 from utils import quat2mat, quat2mat_batch, rotate_forward, tvector2mat, tvector2mat_batch, inverse_batch, \
     rotate_forward_batch
 
@@ -167,7 +167,7 @@ class CombinedLoss(nn.Module):
 
         return RT_predicted_batch
 
-    def forward(self, point_clouds, target_transl, target_rot, transl_err, rot_err):
+    def forward(self, point_clouds, target_transl, target_rot, transl_err, rot_err0):
         # import copy
         # point_clouds2 = copy.deepcopy(point_clouds)
         # RT_predicted_batch = self.forward_old(point_clouds2, target_transl.clone(), target_rot.clone(), transl_err.clone(), rot_err.clone())
@@ -187,6 +187,7 @@ class CombinedLoss(nn.Module):
         if self.rescale_trans != 0.:
             loss_transl = self.transl_loss(transl_err, target_transl).sum(1).mean()
         loss_rot = 0.
+        rot_err = matrix_to_quaternion(rot_err0)
         if self.rescale_rot != 0.:
             loss_rot = quaternion_distance(rot_err, target_rot, rot_err.device).mean()
         pose_loss = self.rescale_trans * loss_transl + self.rescale_rot * loss_rot

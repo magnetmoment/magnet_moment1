@@ -351,10 +351,15 @@ def bilinear_interpolate_torch(im, x, y, align=False):
     y1_f = torch.clamp(y1, 0, im.shape[0] - 1).reshape(-1)
 
     B = torch.arange(0, batch).unsqueeze(-1).expand(-1, N).reshape(-1)
-    Ia = im[B, :, y0_f, x0_f].reshape(batch, N, -1)
-    Ib = im[B, :, y1_f, x0_f].reshape(batch, N, -1)
-    Ic = im[B, :, y0_f, x1_f].reshape(batch, N, -1)
-    Id = im[B, :, y1_f, x1_f].reshape(batch, N, -1)
+    Ia = im[B, :, y0_f, x0_f]
+    Ib = im[B, :, y1_f, x0_f]
+    Ic = im[B, :, y0_f, x1_f]
+    Id = im[B, :, y1_f, x1_f]
+
+    Ia = Ia.reshape(batch, N, -1)
+    Ib = Ib.reshape(batch, N, -1)
+    Ic = Ic.reshape(batch, N, -1)
+    Id = Id.reshape(batch, N, -1)
 
     if align:
         x0 = x0.float() + 0.5
@@ -539,7 +544,7 @@ class LCCNet(nn.Module):
             self.dc_conv6 = myconv(64, 32, kernel_size=3, stride=1, padding=1, dilation=1)
             self.dc_conv7 = predict_flow(32)
         self.get_weight = nn.Sequential(
-            nn.Conv2d(od + dd[4], 1, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), groups=1, bias=True),
+            nn.Conv2d(96, 1, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), groups=1, bias=True),
             nn.Sigmoid())
 
         fc_size = od + dd[4]
@@ -621,66 +626,100 @@ class LCCNet(nn.Module):
 
         return output * mask
 
-    def newton_gauss(self, pc_f, flow, weight, mask, K):
+    def newton_gauss(self, pc, u, v, flow, weight, mask, K0):
+        K = K0.float()  # flow = u_t - u
         B = flow.shape[0]
-        r = torch.zeros([B, 24000, 2, 1], dtype=torch.float32).cuda()  # B N 2 6
-        J = torch.zeros([B, 24000, 2, 6], dtype=torch.float32).cuda()  # B N 2 6
-        pc_f = torch.zeros([B, 4, 24000], dtype=torch.float32).cuda()  # B N 2 6
-        pc_origin = torch.zeros([B, 4, 24000], dtype=torch.float32).cuda()  # B N 2 6
-        u_gt = torch.zeros([B, 24000], dtype=torch.float32).cuda()  # B N 2 6
-        v_gt = torch.zeros([B, 24000], dtype=torch.float32).cuda()
-        fx = K[:, 0, 0]
-        fy = K[:, 1, 1]
+        N = flow.shape[1]
+        M = 10
+        # r = torch.zeros([M, B, N, 2, 1], dtype=torch.float32).cuda()  # B N 2 6
+        # J = torch.zeros([M, B, N, 2, 6], dtype=torch.float32).cuda()  # B N 2 6
+        # pc_f = torch.ones([B, N, 1], dtype=torch.float32).cuda()  # B N 2 6
+        # pc_f = torch.cat([pc, pc_f], dim=2)  # B N 4
+        pc_f = pc.clone()
+        pc_f0 = pc.clone()
+        fx = K[:, 0, 0:1]
+        fy = K[:, 1, 1:2]
+        u_t = (u + flow[:, :, 0]).float()
+        v_t = (v + flow[:, :, 1]).float()
+        T_dist = torch.zeros([B, 4, 4], dtype=torch.float32).cuda()
+        T_dist[:, 0, 0] = 1
+        T_dist[:, 1, 1] = 1
+        T_dist[:, 2, 2] = 1
+        T_dist[:, 3, 3] = 1
+        W = weight.squeeze(-1).float() * mask.float()
+        WH = W.unsqueeze(-1).unsqueeze(-1)
+        eps = 1e-7
+        for i in range(M):
+            x = pc_f[:, 0, :]  # B N
+            y = pc_f[:, 1, :]  # B N
+            z = torch.clamp(pc_f[:, 2, :], eps, 80)  # B N
+            # J = torch.zeros([B, N, 2, 6], dtype=torch.float32).cuda()  # B N 2 6
+            # r = torch.zeros([B, N, 2, 1], dtype=torch.float32).cuda()  # B N 2 6如果不重复定义J和r,会有inplace覆盖问题
 
-        for i in range(10):
-            x = pc_f[:, :, 0]  # B N
-            y = pc_f[:, :, 1]  # B N
-            z = pc_f[:, :, 2]  # B N
+            J_list = []
+            J_list.append(fx / z)
+            J_list.append(torch.zeros([B, N], dtype=torch.float32).cuda())
+            J_list.append(-fx * x / (z * z))
+            J_list.append(fx * x * y / (z * z))
+            J_list.append(fx + fx * x * x / (z * z))
+            J_list.append(-fx * y / z)
 
-            eps = 1e-7
-            J[:, :, 0, 0] = fx / (z + eps)
-            J[:, :, 0, 1] = 0
-            J[:, :, 0, 2] = -fx * x / (z * z + eps)
-            J[:, :, 0, 3] = fx * x * y / (z * z + eps)
-            J[:, :, 0, 4] = fx + fx * x * x / (z * z + eps)
-            J[:, :, 0, 5] = -fx * y / (z + eps)
-            J[:, :, 1, 0] = 0
-            J[:, :, 1, 1] = fy / (z + eps)
-            J[:, :, 1, 2] = -fy * y / (z * z + eps)
-            J[:, :, 1, 3] = -fy - fy * y * y / (z * z + eps)
-            J[:, :, 1, 4] = fy * x * y / (z * z + eps)
-            J[:, :, 1, 5] = fy * x / (z + eps)
+            J_list.append(torch.zeros([B, N], dtype=torch.float32).cuda())
+            J_list.append(fy / (z + eps))
+            J_list.append(-fy * y / (z * z))
+            J_list.append(-fy - fy * y * y / (z * z))
+            J_list.append(fy * x * y / (z * z))
+            J_list.append(fy * x / z)
+            J = torch.stack(J_list, dim=2)
+            J = J.reshape(B, N, 2, 6)
+            # J[i, :, :, 0, 0] = fx / (z + eps)
+            # J[i, :, :, 0, 1] = 0
+            # J[i, :, :, 0, 2] = -fx * x / (z * z + eps)
+            # J[i, :, :, 0, 3] = fx * x * y / (z * z + eps)
+            # J[i, :, :, 0, 4] = fx + fx * x * x / (z * z + eps)
+            # J[i, :, :, 0, 5] = -fx * y / (z + eps)
+            # J[i, :, :, 1, 0] = 0
+            # J[i, :, :, 1, 1] = fy / (z + eps)
+            # J[i, :, :, 1, 2] = -fy * y / (z * z + eps)
+            # J[i, :, :, 1, 3] = -fy - fy * y * y / (z * z + eps)
+            # J[i, :, :, 1, 4] = fy * x * y / (z * z + eps)
+            # J[i, :, :, 1, 5] = fy * x / (z + eps)
             JT = J.permute(0, 1, 3, 2)
             proj = K.matmul(pc_f[:, 0:3, :])
-            u = (proj[:, 0, :] / (proj[:, 2, :] + eps)).long()
-            v = (proj[:, 1, :] / (proj[:, 2, :] + eps)).long()
-
-            W = (num_mask * mask).float()  # 更新mask,这里还需要乘上网络更新的weight
-            WH = W.unsqueeze(-1).unsqueeze(-1)
-            Wb = W.unsqueeze(-1).unsqueeze(-1)
+            u = (proj[:, 0, :] / (proj[:, 2, :] + eps))
+            v = (proj[:, 1, :] / (proj[:, 2, :] + eps))
+            # W = weight.squeeze(-1).float() * mask.float()  # 更新mask,这里还需要乘上网络更新的weight
+            # WH = W.unsqueeze(-1).unsqueeze(-1)
+            # Wb = W.unsqueeze(-1).unsqueeze(-1)
 
             H = JT.matmul(J)  # B N 6 6
-            H = WH * H + 1e-05 * torch.eye(6).cuda()  # B N 6 6
-            H = torch.mean(H, dim=1)
+            H = WH * H  # B N 6 6
+            # a = eps * torch.eye(6).cuda()
+            H = torch.mean(H, dim=1) + 1e-4 * torch.eye(6).cuda()
             H_1 = torch.cholesky_inverse(torch.linalg.cholesky(H))
-            r[:, :, 0, 0] = u_gt - u  # B N 2 1
-            r[:, :, 1, 0] = v_gt - v
-            err = Wb * r
-
-            b = Wb * JT.matmul(r)  # B N 6 1
+            r00 = u_t - u  # B N 2 1
+            r10 = v_t - v
+            r = torch.stack([r00, r10], dim=2).reshape(B, N, 2, 1)
+            b = WH * JT.matmul(r)  # B N 6 1
             b = b.mean(dim=1)
             dx = H_1.matmul(b).squeeze(-1)  # 得到迭代结果 # B 6
-            step = SE3.exp(dx).matrix()
             T_dist = SE3.exp(dx).matrix().matmul(T_dist)  # 更新 # B 4 4
-            pc_f = T_dist.matmul(pc_origin)
+            pc_f = T_dist.matmul(pc_f0)
             # delta_T = T_dist[0].inverse().matmul(RT)
             # print(step)
             # proj = proj.permute(0, 2, 1)
-            delta_u = err[0, :, 0, 0]
-            delta_v = err[0, :, 1, 0]
-            print('t_step:{rot}, rot_step:{t}, err{err}'
-                  .format(rot=dx[0, 0:3].norm(), t=dx[0, 3:6].norm(),
-                          err=torch.sum(torch.abs(delta_u)) + torch.sum(torch.abs(delta_v))))
+            # # step = SE3.exp(dx).matrix()
+            # delta_u = err[0, :, 0, 0]
+            # delta_v = err[0, :, 1, 0]
+            # print('t_step:{rot}, rot_step:{t}, err{err}'
+            #       .format(rot=dx[0, 0:3].norm(), t=dx[0, 3:6].norm(),
+            #               err=torch.sum(torch.abs(delta_u)) + torch.sum(torch.abs(delta_v))))
+        sparse_flow = K.matmul(pc_f[:, 0:3, :])
+        z = sparse_flow[:, 2, :].clone()
+        sparse_flow = sparse_flow[:, 0:2, :]
+        sparse_flow[:, 0, :] = sparse_flow[:, 0, :].clone() / z - u
+        sparse_flow[:, 1, :] = sparse_flow[:, 1, :].clone() / z - v
+        return T_dist, sparse_flow
 
     def forward(self, rgb, lidar, uv, pcl_xyz, mask, K):  # B，N，H  插值
         # H, W = rgb.shape[2:4]
@@ -828,11 +867,17 @@ class LCCNet(nn.Module):
         # 真实光流
         weight = self.get_weight(x)
 
-        sparse_flow = bilinear_interpolate_torch(flow2, uv[:, :, 0] * 256.0 / 1380.0,
-                                                 uv[:, :, 1] * 128.0 / 384.0)
-        sparse_weight = bilinear_interpolate_torch(weight, uv[:, :, 0] * 256.0 / 1380.0,
-                                                   uv[:, :, 1] * 128.0 / 384.0)
-        self.newton_gauss(pcl_xyz, sparse_flow, sparse_weight, mask, K)
+        kx4 = 256.0 / 1380.0
+        ky4 = 128.0 / 384.0
+        sparse_flow = bilinear_interpolate_torch(flow2, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4).float()
+        sparse_weight = bilinear_interpolate_torch(weight, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4).float()
+        K4 = K.clone()
+        K4[:, 0, 0] = K[:, 0, 0] * kx4
+        K4[:, 0, 2] = K[:, 0, 2] * kx4
+        K4[:, 1, 1] = K[:, 1, 1] * ky4
+        K4[:, 1, 2] = K[:, 1, 2] * ky4
+        T_dist, rigid_flow = self.newton_gauss(pcl_xyz, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4, sparse_flow,
+                                               sparse_weight, mask, K4)
         # x = x.view(x.shape[0], -1)  # 32,N
         # x = self.dropout(x)
         # x = self.leakyRELU(self.fc1(x))  # 32,N to 512
@@ -842,5 +887,7 @@ class LCCNet(nn.Module):
         # transl = self.fc2_trasl(transl)  # 256 o 3
         # rot = self.fc2_rot(rot)  # 256 to 4
         # rot = F.normalize(rot, dim=1)  # 归一化
+        sparse_flow[:, :, 0] = sparse_flow[:, :, 0] / kx4
+        sparse_flow[:, :, 1] = sparse_flow[:, :, 1] / ky4
 
-        return flow5, flow4, flow3, flow2, sparse_flow  # transl, rot
+        return T_dist, sparse_flow  # transl, rot

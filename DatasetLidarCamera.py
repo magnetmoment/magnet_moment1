@@ -60,26 +60,42 @@ def get_2D_lidar_projection(pcl, cam_intrinsic):
     return pcl_uv, pcl_z
 
 
-def lidar_project_depth(pc_rotated, cam_calib, img_shape):
+def lidar_project_depth(pc_rotated, cam_calib, img_shape):#不主动删点
     pc_rotated = pc_rotated[:3, :].detach().cpu().numpy()
     cam_intrinsic = cam_calib
-    pcl_uv, pcl_z = get_2D_lidar_projection(pc_rotated.T, cam_intrinsic)
-    mask = (pcl_uv[:, 0] > 0) & (pcl_uv[:, 0] < img_shape[1]) & (pcl_uv[:, 1] > 0) & (
-            pcl_uv[:, 1] < img_shape[0]) & (pcl_z > 0)
-    pcl_uv = pcl_uv[mask]
-    pcl_z = pcl_z[mask]
-    pcl_xy = pc_rotated[0:2, mask].transpose(1, 0)
-    pcl_xyz = np.concatenate([pcl_xy, pcl_z[:, None]], axis=1)
+    pcl_uv0, pcl_z0 = get_2D_lidar_projection(pc_rotated.T, cam_intrinsic)
+    mask = (pcl_uv0[:, 0] > 0) & (pcl_uv0[:, 0] < img_shape[1]) & (pcl_uv0[:, 1] > 0) & (
+            pcl_uv0[:, 1] < img_shape[0]) & (pcl_z0 > 0)
+    pcl_uv = pcl_uv0[mask]
+    pcl_z = pcl_z0[mask]
     pcl_uv2 = pcl_uv.astype(np.uint32)
     pcl_z = pcl_z.reshape(-1, 1)
     depth_img = np.zeros((img_shape[0], img_shape[1], 1))
     depth_img[pcl_uv2[:, 1], pcl_uv2[:, 0]] = pcl_z
     depth_img = torch.from_numpy(depth_img.astype(np.float32))
-    depth_img = depth_img
+    mask = torch.from_numpy(mask)
     depth_img = depth_img.permute(2, 0, 1)
 
-    return depth_img, pcl_uv, pcl_xyz, mask
+    return depth_img, pcl_uv0, mask
 
+# def lidar_project_depth_remain(pc_rotated, cam_calib, img_shape):#不主动删除越界点
+#     pc_rotated = pc_rotated[:3, :].detach().cpu().numpy()
+#     cam_intrinsic = cam_calib
+#     pcl_uv, pcl_z = get_2D_lidar_projection(pc_rotated.T, cam_intrinsic)
+#     mask = (pcl_uv[:, 0] > 0) & (pcl_uv[:, 0] < img_shape[1]) & (pcl_uv[:, 1] > 0) & (
+#             pcl_uv[:, 1] < img_shape[0]) & (pcl_z > 0)
+#
+#     pcl_xy = pc_rotated[0:2, :].transpose(1, 0)
+#     pcl_xyz = np.concatenate([pcl_xy, pcl_z[:, None]], axis=1)
+#     pcl_uv2 = pcl_uv.astype(np.uint32)
+#     pcl_z = pcl_z.reshape(-1, 1)
+#     depth_img = np.zeros((img_shape[0], img_shape[1], 1))
+#     depth_img[pcl_uv2[:, 1], pcl_uv2[:, 0]] = pcl_z
+#     depth_img = torch.from_numpy(depth_img.astype(np.float32))
+#     depth_img = depth_img
+#     depth_img = depth_img.permute(2, 0, 1)
+#
+#     return depth_img, pcl_uv, pcl_xyz, mask
 
 class DatasetLidarCameraKittiOdometry(Dataset):
 
@@ -218,14 +234,15 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         valid_indices = valid_indices | (pc[:, 1] < -3.)
         valid_indices = valid_indices | (pc[:, 1] > 3.)
         pc = pc[valid_indices].copy()
+        N = 0
         if pc.shape[0] >= self.max_points:
             pc = pc[:self.max_points, :]
+            N = self.max_points
         else:
+            N = pc.shape[0]
             pc = np.pad(pc, [[0, self.max_points - pc.shape[0]], [0, 0]], constant_values=0)
+
         pc_org = torch.from_numpy(pc.astype(np.float32))
-        # if self.use_reflectance:
-        #     reflectance = pc[:, 3].copy()
-        #     reflectance = torch.from_numpy(reflectance).float()
 
         RT = self.GTs_T_cam02_velo[seq].astype(np.float32)
 
@@ -240,47 +257,11 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         else:
             raise TypeError("Wrong PointCloud shape")
         pc_rot = np.matmul(RT, pc_org.numpy())
-        # a = (RT @ pc_org.T).T
         pc_rot = pc_rot.astype(np.float32).copy()
         pc_in = torch.from_numpy(pc_rot)
 
-        # pc_rot = np.matmul(RT, pc.T)
-        # pc_rot = pc_rot.astype(np.float).T.copy()
-        # pc_in = torch.from_numpy(pc_rot.astype(np.float32))#.float()
-
-        # if pc_in.shape[1] == 4 or pc_in.shape[1] == 3:
-        #     pc_in = pc_in.t()
-        # if pc_in.shape[0] == 3:
-        #     homogeneous = torch.ones(pc_in.shape[1]).unsqueeze(0)
-        #     pc_in = torch.cat((pc_in, homogeneous), 0)
-        # elif pc_in.shape[0] == 4:
-        #      if not torch.all(pc_in[3,:] == 1.):
-        #         pc_in[3,:] = 1.
-        # else:
-        #     raise TypeError("Wrong PointCloud shape")
-
-        h_mirror = False
-        # if np.random.rand() > 0.5 and self.split == 'train':
-        #     h_mirror = True
-        #     pc_in[1, :] *= -1
-
         img = Image.open(img_path)
-        # img = cv2.imread(img_path)
-        img_rotation = 10.
-        # if self.split == 'train':
-        #     img_rotation = np.random.uniform(-5, 5)
-        try:
-            img = self.custom_transform(img, img_rotation, h_mirror)
-        except OSError:
-            new_idx = np.random.randint(0, self.__len__())
-            return self.__getitem__(new_idx)
-
-        # Rotate PointCloud for img_rotation
-        if self.split == 'train':
-            R = mathutils.Euler((radians(img_rotation), 0, 0), 'XYZ')
-            T = mathutils.Vector((0., 0., 0.))
-            pc_in = rotate_forward(pc_in, R, T)
-
+        img = self.custom_transform(img)
         if self.split == 'train':
             max_angle = self.max_r
             rotz = np.random.uniform(-max_angle, max_angle) * (3.141592 / 180.0)
@@ -304,38 +285,30 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         # test则在初始化的时候提前设置好,每个epoch都使用相同的参数
         R = mathutils.Euler((rotx, roty, rotz), 'XYZ')
         T = mathutils.Vector((transl_x, transl_y, transl_z))
-
         R, T = invert_pose(R, T)
         R, T = torch.tensor(R), torch.tensor(T)
 
         # io.imshow(depth_img.numpy(), cmap='jet')
         # io.show()
         calib = self.K[seq]
-        if h_mirror:
-            calib[2] = (img.shape[2] / 2) * 2 - calib[2]
-
         real_shape = [img.shape[1], img.shape[2], img.shape[0]]
 
-        # pc_in = pc_in.cuda() # 变换到相机坐标系下的激光雷达点云
-        pc_lidar = pc_in.clone()
-
-        if self._config['max_depth'] < 80.:
-            pc_lidar = pc_lidar[:, pc_lidar[0, :] < self._config['max_depth']].clone()
-
-        depth_gt, uv_gt, pcl_xyz, mask = lidar_project_depth(pc_lidar, calib, real_shape)  # image_shape
+        # pc_in = pc_in.cuda() # 变换到相机坐标系下的全部激光雷达点云,Mask1表示越界的
+        mask0 = torch.zeros([self.max_points],dtype=torch.bool)
+        mask0[0:N] = True
+        depth_gt, uv_gt, mask1 = lidar_project_depth(pc_in, calib, real_shape)
+        # image_shape
         depth_gt /= self._config['max_depth']
+
 
         RR = mathutils.Quaternion(R).to_matrix()
         RR.resize_4x4()
         TT = mathutils.Matrix.Translation(T)
         RT_ = TT * RR
 
-        pc_rotated = rotate_back(pc_in, RT_)  # Pc` = RT * Pc
+        pc_rotated = rotate_back(pc_in, RT_)  # Pc` = RT * Pc这里删去了原本就越界的点
 
-        if self._config['max_depth'] < 80.:
-            pc_rotated = pc_rotated[:, pc_rotated[0, :] < self._config['max_depth']].clone()
-
-        depth_img, uv, pcl_xyz, mask = lidar_project_depth(pc_rotated, calib, real_shape)  # image_shape
+        depth_img, uv, mask2 = lidar_project_depth(pc_rotated, calib, real_shape)  # image_shape
         depth_img /= self._config['max_depth']
 
         # PAD ONLY ON RIGHT AND BOTTOM SIDE 这样不会改变内参
@@ -350,26 +323,27 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         depth_img = F.pad(depth_img, shape_pad)
         depth_gt = F.pad(depth_gt, shape_pad)
 
-        uv_gt2 = np.zeros((self.max_points, 2), dtype=np.float32)
-        uv2 = np.zeros((self.max_points, 2), dtype=np.float32)
-        pcl_xyz2 = np.zeros((self.max_points, 3), dtype=np.float32)
-        uv_gt2[0: uv_gt.shape[0], :] = uv_gt
-        uv2[0: uv.shape[0], :] = uv
-        pcl_xyz2[0: uv.shape[0], :] = pcl_xyz
+        mask = mask0 * mask1 * mask2
+        # mask = torch.zeros([self.max_points],dtype =torch.bool)
+        num = mask.int().sum()
+        # print(num)
+        num0 = mask0.int().sum()
+        num1 = mask1.int().sum()
+        num2 = mask2.int().sum()
         # 16 32, 32 64, 64 128, 128 256,
         if self.split == 'test':
             sample = {'rgb': img, 'point_cloud': pc_in, 'calib': calib,
                       'tr_error': T, 'rot_error': R, 'seq': int(seq), 'img_path': img_path,
                       'rgb_name': rgb_name + '.png', 'item': item, 'extrin': RT,
-                      'initial_RT': initial_RT, 'uv': uv2, 'uv_gt': uv_gt2,
-                      'mask': mask, 'pcl_xyz': pcl_xyz2}
+                      'initial_RT': initial_RT, 'uv': uv, 'uv_gt': uv_gt,
+                      'mask': mask, 'pcl_xyz': pc_rotated}
         else:
             sample = {'rgb': img, 'point_cloud': pc_in, 'calib': calib,
                       'tr_error': T, 'rot_error': R, 'seq': int(seq),
                       'rgb_name': rgb_name, 'item': item, 'extrin': RT, 'lidar_input': depth_img,
                       'rgb_input': rgb, 'pc_rotated': pc_rotated, 'shape_pad': shape_pad,
-                      'real_shape': real_shape, 'depth_gt': depth_gt, 'uv': uv2, 'uv_gt': uv_gt2,
-                      'mask': mask, 'pcl_xyz': pcl_xyz2}
+                      'real_shape': real_shape, 'depth_gt': depth_gt, 'uv': uv, 'uv_gt': uv_gt,
+                      'mask': mask, 'pcl_xyz': pc_rotated}
 
         return sample
 
