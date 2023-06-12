@@ -345,10 +345,15 @@ def bilinear_interpolate_torch(im, x, y, align=False):
     y0 = torch.floor(y).long()
     y1 = y0 + 1
 
-    x0_f = torch.clamp(x0, 0, im.shape[1] - 1).reshape(-1)
-    x1_f = torch.clamp(x1, 0, im.shape[1] - 1).reshape(-1)
-    y0_f = torch.clamp(y0, 0, im.shape[0] - 1).reshape(-1)
-    y1_f = torch.clamp(y1, 0, im.shape[0] - 1).reshape(-1)
+    x0 = torch.clamp(x0, 0, im.shape[3] - 1)
+    x1 = torch.clamp(x1, 0, im.shape[3] - 1)
+    y0 = torch.clamp(y0, 0, im.shape[2] - 1)
+    y1 = torch.clamp(y1, 0, im.shape[2] - 1)
+
+    x0_f = x0.reshape(-1)
+    x1_f = x1.reshape(-1)
+    y0_f = y0.reshape(-1)
+    y1_f = y1.reshape(-1)
 
     B = torch.arange(0, batch).unsqueeze(-1).expand(-1, N).reshape(-1)
     Ia = im[B, :, y0_f, x0_f]
@@ -376,31 +381,6 @@ def bilinear_interpolate_torch(im, x, y, align=False):
     return ans
 
 
-# class rigid_flow(nn.Module):
-#     def __init__(self, in_channels, original_img_size, cur_img_size, K):
-#         super(rigid_flow, self).__init__()
-#
-#         # localization net
-#         self.conv1_flow = nn.Conv1d(in_channels, 2, kernel_size=(1,), stride=(1,), bias=False)
-#         self.conv1_weight = nn.Conv1d(in_channels, 1, kernel_size=(1,), stride=(1,), bias=False)
-#
-#     def get_rigid_flow(self, sparse_weight, K, current_shape, original_img_size):
-#
-#     def forward(self, feature, dense_flow, uv, pcl_xyz, mask):  # stn
-#         # 1.取得点特征和点光流
-#         sparse_flow = bilinear_interpolate_torch(dense_flow, uv[:, :, 0], uv[:, :, 1])
-#         sparse_feature = bilinear_interpolate_torch(feature, uv[:, :, 0], uv[:, :, 1])
-#         sparse_weight = self.conv1_weight(sparse_feature)
-#         current_shape = feature.shape
-#         # 2.用高斯牛顿法计算出 delta_T和刚性光流
-#         delta_T, rigid_sparse_flow = get_rigid_flow(sparse_flow,\
-#                             sparse_weight, K, current_shape, original_img_size)
-#         # 3.融合光流
-#
-#
-#         return
-
-
 class LCCNet(nn.Module):
     """
     Based on the PWC-DC net. add resnet encoder, dilation convolution and densenet connections
@@ -422,13 +402,6 @@ class LCCNet(nn.Module):
         # original resnet
         self.pretrained_encoder = True
         self.net_encoder = ResnetEncoder(num_layers=self.res_num, pretrained=True, num_input_images=1)
-
-        # self.spatial_dim=image_size
-        # self._in_ch=1
-        # self._sksize=3
-        #
-        # # point stn
-        # self.stnmod = SpatialTransformer(self._in_ch, self.spatial_dim, self._sksize)
 
         # resnet with leakyRELU
         self.Action_Func = Action_Func
@@ -460,15 +433,36 @@ class LCCNet(nn.Module):
         self.layer4_rgb = self._make_layer(block, 512, layers[3], stride=2)
 
         # lidar_image
-        self.inplanes = 64
-        self.conv1_lidar = nn.Conv2d(input_lidar, 64, kernel_size=7, stride=2, padding=3)
+        self.inplanes = 32
+        self.conv1_lidar = nn.Conv2d(input_lidar, 32, kernel_size=7, stride=2, padding=3)
         self.elu_lidar = nn.ELU()
         self.leakyRELU_lidar = nn.LeakyReLU(0.1)
         self.maxpool_lidar = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1_lidar = self._make_layer(block, 64, layers[0])
-        self.layer2_lidar = self._make_layer(block, 128, layers[1], stride=2)
-        self.layer3_lidar = self._make_layer(block, 256, layers[2], stride=2)
-        self.layer4_lidar = self._make_layer(block, 512, layers[3], stride=2)
+        self.layer1_lidar = self._make_layer(block, 32, layers[0])
+        self.layer2_lidar = self._make_layer(block, 64, layers[1], stride=2)
+        self.layer3_lidar = self._make_layer(block, 128, layers[2], stride=2)
+        self.layer4_lidar = self._make_layer(block, 256, layers[3], stride=2)
+
+        self.reduce6 = nn.Sequential(
+            nn.Conv2d(512, 256, kernel_size=(1, 1), stride=(1, 1)),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.1))
+        self.reduce5 = nn.Sequential(
+            nn.Conv2d(256, 128, kernel_size=(1, 1), stride=(1, 1)),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.1))
+        self.reduce4 = nn.Sequential(
+            nn.Conv2d(128, 64, kernel_size=(1, 1), stride=(1, 1)),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.1))
+        self.reduce3 = nn.Sequential(
+            nn.Conv2d(64, 32, kernel_size=(1, 1), stride=(1, 1)),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1))
+        self.reduce2 = nn.Sequential(
+            nn.Conv2d(64, 32, kernel_size=(1, 1), stride=(1, 1)),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1))
 
         self.corr = Correlation(pad_size=md, kernel_size=1, max_displacement=md, stride1=1, stride2=1,
                                 corr_multiply=1)  # md=4
@@ -476,75 +470,75 @@ class LCCNet(nn.Module):
 
         nd = (2 * md + 1) ** 2
         dd = np.cumsum([128, 128, 96, 64, 32])
-
         od = nd
         self.conv6_0 = myconv(od, 128, kernel_size=3, stride=1)
-        self.conv6_1 = myconv(od + dd[0], 128, kernel_size=3, stride=1)
-        self.conv6_2 = myconv(od + dd[1], 96, kernel_size=3, stride=1)
-        self.conv6_3 = myconv(od + dd[2], 64, kernel_size=3, stride=1)
-        self.conv6_4 = myconv(od + dd[3], 32, kernel_size=3, stride=1)
+        self.conv6_1 = myconv(128, 128, kernel_size=3, stride=1)
+        self.conv6_2 = myconv(128, 96, kernel_size=3, stride=1)
+        self.conv6_3 = myconv(96, 64, kernel_size=3, stride=1)
+        self.conv6_4 = myconv(64, 32, kernel_size=3, stride=1)
 
         if use_feat_from > 1:
-            self.predict_flow6 = predict_flow(od + dd[4])
+            self.predict_flow6 = predict_flow(32)
             self.deconv6 = deconv(2, 2, kernel_size=4, stride=2, padding=1)
-            self.upfeat6 = deconv(od + dd[4], 2, kernel_size=4, stride=2, padding=1)
+            self.upfeat6 = deconv(32, 2, kernel_size=4, stride=2, padding=1)
 
             od = nd + add_list[0] + 4
             self.conv5_0 = myconv(od, 128, kernel_size=3, stride=1)
-            self.conv5_1 = myconv(od + dd[0], 128, kernel_size=3, stride=1)
-            self.conv5_2 = myconv(od + dd[1], 96, kernel_size=3, stride=1)
-            self.conv5_3 = myconv(od + dd[2], 64, kernel_size=3, stride=1)
-            self.conv5_4 = myconv(od + dd[3], 32, kernel_size=3, stride=1)
+            self.conv5_1 = myconv(128, 128, kernel_size=3, stride=1)
+            self.conv5_2 = myconv(128, 96, kernel_size=3, stride=1)
+            self.conv5_3 = myconv(96, 64, kernel_size=3, stride=1)
+            self.conv5_4 = myconv(64, 32, kernel_size=3, stride=1)
 
         if use_feat_from > 2:
-            self.predict_flow5 = predict_flow(od + dd[4])
+            self.predict_flow5 = predict_flow(32)
             self.deconv5 = deconv(2, 2, kernel_size=4, stride=2, padding=1)
-            self.upfeat5 = deconv(od + dd[4], 2, kernel_size=4, stride=2, padding=1)
+            self.upfeat5 = deconv(32, 2, kernel_size=4, stride=2, padding=1)
 
             od = nd + add_list[1] + 4
             self.conv4_0 = myconv(od, 128, kernel_size=3, stride=1)
-            self.conv4_1 = myconv(od + dd[0], 128, kernel_size=3, stride=1)
-            self.conv4_2 = myconv(od + dd[1], 96, kernel_size=3, stride=1)
-            self.conv4_3 = myconv(od + dd[2], 64, kernel_size=3, stride=1)
-            self.conv4_4 = myconv(od + dd[3], 32, kernel_size=3, stride=1)
+            self.conv4_1 = myconv(128, 128, kernel_size=3, stride=1)
+            self.conv4_2 = myconv(128, 96, kernel_size=3, stride=1)
+            self.conv4_3 = myconv(96, 64, kernel_size=3, stride=1)
+            self.conv4_4 = myconv(64, 32, kernel_size=3, stride=1)
 
         if use_feat_from > 3:
-            self.predict_flow4 = predict_flow(od + dd[4])
+            self.predict_flow4 = predict_flow(32)
             self.deconv4 = deconv(2, 2, kernel_size=4, stride=2, padding=1)
-            self.upfeat4 = deconv(od + dd[4], 2, kernel_size=4, stride=2, padding=1)
+            self.upfeat4 = deconv(32, 2, kernel_size=4, stride=2, padding=1)
 
             od = nd + add_list[2] + 4
             self.conv3_0 = myconv(od, 128, kernel_size=3, stride=1)
-            self.conv3_1 = myconv(od + dd[0], 128, kernel_size=3, stride=1)
-            self.conv3_2 = myconv(od + dd[1], 96, kernel_size=3, stride=1)
-            self.conv3_3 = myconv(od + dd[2], 64, kernel_size=3, stride=1)
-            self.conv3_4 = myconv(od + dd[3], 32, kernel_size=3, stride=1)
+            self.conv3_1 = myconv(128, 128, kernel_size=3, stride=1)
+            self.conv3_2 = myconv(128, 96, kernel_size=3, stride=1)
+            self.conv3_3 = myconv(96, 64, kernel_size=3, stride=1)
+            self.conv3_4 = myconv(64, 32, kernel_size=3, stride=1)
 
         if use_feat_from > 4:
-            self.predict_flow3 = predict_flow(od + dd[4])
+            self.predict_flow3 = predict_flow(32)
             self.deconv3 = deconv(2, 2, kernel_size=4, stride=2, padding=1)
-            self.upfeat3 = deconv(od + dd[4], 2, kernel_size=4, stride=2, padding=1)
+            self.upfeat3 = deconv(32, 2, kernel_size=4, stride=2, padding=1)
 
             od = nd + add_list[3] + 4
             self.conv2_0 = myconv(od, 128, kernel_size=3, stride=1)
-            self.conv2_1 = myconv(od + dd[0], 128, kernel_size=3, stride=1)
-            self.conv2_2 = myconv(od + dd[1], 96, kernel_size=3, stride=1)
-            self.conv2_3 = myconv(od + dd[2], 64, kernel_size=3, stride=1)
-            self.conv2_4 = myconv(od + dd[3], 32, kernel_size=3, stride=1)
+            self.conv2_1 = myconv(128, 128, kernel_size=3, stride=1)
+            self.conv2_2 = myconv(128, 96, kernel_size=3, stride=1)
+            self.conv2_3 = myconv(96, 64, kernel_size=3, stride=1)
+            self.conv2_4 = myconv(64, 32, kernel_size=3, stride=1)
 
         if use_feat_from > 5:
-            self.predict_flow2 = predict_flow(od + dd[4])
+            self.predict_flow2 = predict_flow(32)
             self.deconv2 = deconv(2, 2, kernel_size=4, stride=2, padding=1)
 
-            self.dc_conv1 = myconv(od + dd[4], 128, kernel_size=3, stride=1, padding=1, dilation=1)
-            self.dc_conv2 = myconv(128, 128, kernel_size=3, stride=1, padding=2, dilation=2)
-            self.dc_conv3 = myconv(128, 128, kernel_size=3, stride=1, padding=4, dilation=4)
+            self.dc_conv1 = myconv(32, 64, kernel_size=3, stride=1, padding=1, dilation=1)
+            self.dc_conv2 = myconv(64, 96, kernel_size=3, stride=1, padding=2, dilation=2)
+            self.dc_conv3 = myconv(96, 128, kernel_size=3, stride=1, padding=4, dilation=4)
             self.dc_conv4 = myconv(128, 96, kernel_size=3, stride=1, padding=8, dilation=8)
             self.dc_conv5 = myconv(96, 64, kernel_size=3, stride=1, padding=16, dilation=16)
             self.dc_conv6 = myconv(64, 32, kernel_size=3, stride=1, padding=1, dilation=1)
             self.dc_conv7 = predict_flow(32)
+
         self.get_weight = nn.Sequential(
-            nn.Conv2d(96, 1, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), groups=1, bias=True),
+            nn.Conv2d(32, 1, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), groups=1, bias=True),
             nn.Sigmoid())
 
         fc_size = od + dd[4]
@@ -648,8 +642,8 @@ class LCCNet(nn.Module):
         T_dist[:, 3, 3] = 1
         W = weight.squeeze(-1).float() * mask.float()
         WH = W.unsqueeze(-1).unsqueeze(-1)
-        eps = 1e-7
-        for i in range(M):
+        eps = 1e-6
+        for i in range(0):
             x = pc_f[:, 0, :]  # B N
             y = pc_f[:, 1, :]  # B N
             z = torch.clamp(pc_f[:, 2, :], eps, 80)  # B N
@@ -694,8 +688,9 @@ class LCCNet(nn.Module):
 
             H = JT.matmul(J)  # B N 6 6
             H = WH * H  # B N 6 6
+            H[:, :, :, :] = 0
             # a = eps * torch.eye(6).cuda()
-            H = torch.mean(H, dim=1) + 1e-4 * torch.eye(6).cuda()
+            H = torch.mean(H, dim=1) + 1e-3 * torch.eye(6).cuda()
             H_1 = torch.cholesky_inverse(torch.linalg.cholesky(H))
             r00 = u_t - u  # B N 2 1
             r10 = v_t - v
@@ -773,7 +768,6 @@ class LCCNet(nn.Module):
             # draw_features(16, 16, c25.cpu().numpy(), "{}/lidar_c25.png".format(savepath))
             c26 = self.layer4_lidar(c25)  # 32  32，512，8，16
             # draw_features(16, 32, c26.cpu().numpy(), "{}/lidar_c26.png".format(savepath))
-
         else:
             x1 = self.conv1_rgb(rgb)
             x2 = self.conv1_lidar(lidar)
@@ -792,83 +786,83 @@ class LCCNet(nn.Module):
             c16 = self.layer4_rgb(c15)  # 32
             c26 = self.layer4_lidar(c25)  # 32
 
-        corr6 = self.corr(c16, c26)  # 最后一层  1，512，8，16  O   1，81，8，16
+        corr6 = self.corr(self.reduce6(c16), c26)  # 最后一层  1，512，8，16  O   1，81，8，16
         # draw_features(9, 9, c23.cpu().numpy(), "{}/corr6.png".format(savepath))
         corr6 = self.leakyRELU(corr6)
-        x = torch.cat((self.conv6_0(corr6), corr6), 1)  # 32，81+128,8,16   209
+        x = self.conv6_0(corr6)  # 32，81+128,8,16   209
         # draw_features(16, 16, x.cpu().numpy(), "{}/x_1.png".format(savepath))
-        x = torch.cat((self.conv6_1(x), x), 1)  # 32,81+128+128,8,16      337
+        x = self.conv6_1(x)  # 32,81+128+128,8,16      337
         # draw_features(20, 20, x.cpu().numpy(), "{}/x_2.png".format(savepath))
-        x = torch.cat((self.conv6_2(x), x), 1)  # 32,81+128+128+96,8,16   433
+        x = self.conv6_2(x)  # 32,81+128+128+96,8,16   433
         # draw_features(25, 25, x.cpu().numpy(), "{}/x_3.png".format(savepath))
-        x = torch.cat((self.conv6_3(x), x), 1)  # 32,81+128+128+96+64,8,16 497
+        x = self.conv6_3(x)  # 32,81+128+128+96+64,8,16 497
         # draw_features(25, 25, x.cpu().numpy(), "{}/x_4.png".format(savepath))
-        x = torch.cat((self.conv6_4(x), x), 1)  # 32,81+128+128+96+64+32,8,16 529
+        x = self.conv6_4(x)  # 32,81+128+128+96+64+32,8,16 529
         # draw_features(25, 25, x.cpu().numpy(), "{}/x_5.png".format(savepath))
         # use_feat_from=1
         flow6 = self.predict_flow6(x)
         up_flow6 = self.deconv6(flow6)  # 我们直接回归出点云在当前尺寸图像下的真实光流
         up_feat6 = self.upfeat6(x)
-
-        warp5 = self.warp(c25, up_flow6)
-        corr5 = self.corr(c15, warp5)
+        # upflow6 upflow5 upflow4 upflow3 upflow2是 64 256尺度上的光流
+        warp5 = self.warp(c25, up_flow6 / 8)
+        corr5 = self.corr(self.reduce5(c15), warp5)
         corr5 = self.leakyRELU(corr5)
         x = torch.cat((corr5, c15, up_flow6, up_feat6), 1)
-        x = torch.cat((self.conv5_0(x), x), 1)
-        x = torch.cat((self.conv5_1(x), x), 1)
-        x = torch.cat((self.conv5_2(x), x), 1)
-        x = torch.cat((self.conv5_3(x), x), 1)
-        x = torch.cat((self.conv5_4(x), x), 1)
+        x = self.conv5_0(x)
+        x = self.conv5_1(x)
+        x = self.conv5_2(x)
+        x = self.conv5_3(x)
+        x = self.conv5_4(x)
 
         flow5 = self.predict_flow5(x)
         up_flow5 = self.deconv5(flow5)  # 真实光流
         up_feat5 = self.upfeat5(x)
 
-        warp4 = self.warp(c24, up_flow5)
-        corr4 = self.corr(c14, warp4)
+        warp4 = self.warp(c24, up_flow5 / 4)
+        corr4 = self.corr(self.reduce4(c14), warp4)
         corr4 = self.leakyRELU(corr4)
         x = torch.cat((corr4, c14, up_flow5, up_feat5), 1)
-        x = torch.cat((self.conv4_0(x), x), 1)
-        x = torch.cat((self.conv4_1(x), x), 1)
-        x = torch.cat((self.conv4_2(x), x), 1)
-        x = torch.cat((self.conv4_3(x), x), 1)
-        x = torch.cat((self.conv4_4(x), x), 1)
+        x = self.conv4_0(x)
+        x = self.conv4_1(x)
+        x = self.conv4_2(x)
+        x = self.conv4_3(x)
+        x = self.conv4_4(x)
 
         flow4 = self.predict_flow4(x)
         up_flow4 = self.deconv4(flow4)  # 真实光流
         up_feat4 = self.upfeat4(x)
 
-        warp3 = self.warp(c23, up_flow4)
-        corr3 = self.corr(c13, warp3)
+        warp3 = self.warp(c23, up_flow4 / 2)
+        corr3 = self.corr(self.reduce3(c13), warp3)
         corr3 = self.leakyRELU(corr3)
         x = torch.cat((corr3, c13, up_flow4, up_feat4), 1)
-        x = torch.cat((self.conv3_0(x), x), 1)
-        x = torch.cat((self.conv3_1(x), x), 1)
-        x = torch.cat((self.conv3_2(x), x), 1)
-        x = torch.cat((self.conv3_3(x), x), 1)
-        x = torch.cat((self.conv3_4(x), x), 1)
+        x = self.conv3_0(x)
+        x = self.conv3_1(x)
+        x = self.conv3_2(x)
+        x = self.conv3_3(x)
+        x = self.conv3_4(x)
 
         flow3 = self.predict_flow3(x)
         up_flow3 = self.deconv3(flow3)  # 真实光流
         up_feat3 = self.upfeat3(x)
 
         warp2 = self.warp(c22, up_flow3)
-        corr2 = self.corr(c12, warp2)
+        corr2 = self.corr(self.reduce2(c12), warp2)
         corr2 = self.leakyRELU(corr2)
         x = torch.cat((corr2, c12, up_flow3, up_feat3), 1)
-        x = torch.cat((self.conv2_0(x), x), 1)
-        x = torch.cat((self.conv2_1(x), x), 1)
-        x = torch.cat((self.conv2_2(x), x), 1)
-        x = torch.cat((self.conv2_3(x), x), 1)
-        x = torch.cat((self.conv2_4(x), x), 1)
+        x = self.conv2_0(x)
+        x = self.conv2_1(x)
+        x = self.conv2_2(x)
+        x = self.conv2_3(x)
+        x = self.conv2_4(x)
         flow2 = self.predict_flow2(x)
-        x = self.dc_conv4(self.dc_conv3(self.dc_conv2(self.dc_conv1(x))))
-        flow2 = flow2 + self.dc_conv7(self.dc_conv6(self.dc_conv5(x)))
+        # x = self.dc_conv4(self.dc_conv3(self.dc_conv2(self.dc_conv1(x))))
+        # flow2 = flow2 + self.dc_conv7(self.dc_conv6(self.dc_conv5(x)))
         # 真实光流
         weight = self.get_weight(x)
 
         kx4 = 256.0 / 1380.0
-        ky4 = 128.0 / 384.0
+        ky4 = 64.0 / 384.0
         sparse_flow = bilinear_interpolate_torch(flow2, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4).float()
         sparse_weight = bilinear_interpolate_torch(weight, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4).float()
         K4 = K.clone()
@@ -876,7 +870,7 @@ class LCCNet(nn.Module):
         K4[:, 0, 2] = K[:, 0, 2] * kx4
         K4[:, 1, 1] = K[:, 1, 1] * ky4
         K4[:, 1, 2] = K[:, 1, 2] * ky4
-        T_dist, rigid_flow = self.newton_gauss(pcl_xyz, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4, sparse_flow,
+        T_dist, rigid_flow = self.newton_gauss(pcl_xyz, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4, sparse_flow.clone(),
                                                sparse_weight, mask, K4)
         # x = x.view(x.shape[0], -1)  # 32,N
         # x = self.dropout(x)

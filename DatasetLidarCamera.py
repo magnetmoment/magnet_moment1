@@ -10,7 +10,6 @@
 # based on github.com/cattaneod/CMRNet/blob/master/DatasetVisibilityKitti.py
 
 import csv
-from math import radians
 
 import mathutils
 import numpy as np
@@ -24,7 +23,7 @@ from pykitti import odometry
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-from utils import invert_pose, rotate_forward, rotate_back
+from utils import invert_pose, rotate_back
 
 torch.set_num_threads(1)
 import os
@@ -60,7 +59,7 @@ def get_2D_lidar_projection(pcl, cam_intrinsic):
     return pcl_uv, pcl_z
 
 
-def lidar_project_depth(pc_rotated, cam_calib, img_shape):#不主动删点
+def lidar_project_depth(pc_rotated, cam_calib, img_shape):  # 不主动删点
     pc_rotated = pc_rotated[:3, :].detach().cpu().numpy()
     cam_intrinsic = cam_calib
     pcl_uv0, pcl_z0 = get_2D_lidar_projection(pc_rotated.T, cam_intrinsic)
@@ -77,6 +76,7 @@ def lidar_project_depth(pc_rotated, cam_calib, img_shape):#不主动删点
     depth_img = depth_img.permute(2, 0, 1)
 
     return depth_img, pcl_uv0, mask
+
 
 # def lidar_project_depth_remain(pc_rotated, cam_calib, img_shape):#不主动删除越界点
 #     pc_rotated = pc_rotated[:3, :].detach().cpu().numpy()
@@ -101,12 +101,13 @@ class DatasetLidarCameraKittiOdometry(Dataset):
 
     def __init__(self, dataset_dir, transform=None, augmentation=False, use_reflectance=False,
                  max_t=1.5, max_r=20., split='val', device='cpu', val_sequence='00', suf='.png', val=False,
-                 dataset=None, config=None, img_shape=None, max_points=20000, input_size=None):
+                 ratio=1, dataset=None, config=None, img_shape=None, max_points=20000, input_size=None):
         super(DatasetLidarCameraKittiOdometry, self).__init__()
         self._config = config
         self.img_shape = img_shape
         self.max_points = max_points
         self.input_size = input_size
+        self.ratio = ratio
         print('excute kitti dataset init')
         self.__init_kitti_data__(dataset_dir, transform, augmentation, use_reflectance,
                                  max_t, max_r, split, device, val_sequence, suf)
@@ -129,6 +130,7 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         self.suf = suf
 
         self.all_files = []
+        # self.sequence_list = ['01']
         self.sequence_list = ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10',
                               '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21']
         # self.model = CameraModel()
@@ -150,8 +152,11 @@ class DatasetLidarCameraKittiOdometry(Dataset):
             image_list = os.listdir(os.path.join(dataset_dir, 'sequences', seq, 'image_2'))
             image_list.sort()
 
-            for image_name in image_list:
+            if split == 'train':
+                stride = int(1 / self.ratio)
+                image_list = image_list[0:len(image_list):stride]
 
+            for image_name in image_list:
                 if not os.path.exists(os.path.join(dataset_dir, 'sequences', seq, 'velodyne',
                                                    str(image_name.split('.')[0]) + '.bin')):
                     continue
@@ -161,6 +166,8 @@ class DatasetLidarCameraKittiOdometry(Dataset):
                 if seq == val_sequence:
                     if split.startswith('val') or split == 'test':
                         self.all_files.append(os.path.join(seq, image_name.split('.')[0]))
+                # if split == 'train':
+                #     self.all_files.append(os.path.join(seq, image_name.split('.')[0]))
                 elif (not seq == val_sequence) and split == 'train':
                     self.all_files.append(os.path.join(seq, image_name.split('.')[0]))
 
@@ -241,7 +248,6 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         else:
             N = pc.shape[0]
             pc = np.pad(pc, [[0, self.max_points - pc.shape[0]], [0, 0]], constant_values=0)
-
         pc_org = torch.from_numpy(pc.astype(np.float32))
 
         RT = self.GTs_T_cam02_velo[seq].astype(np.float32)
@@ -260,8 +266,8 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         pc_rot = pc_rot.astype(np.float32).copy()
         pc_in = torch.from_numpy(pc_rot)
 
-        img = Image.open(img_path)
-        img = self.custom_transform(img)
+        img0 = Image.open(img_path)
+        img = self.custom_transform(img0)
         if self.split == 'train':
             max_angle = self.max_r
             rotz = np.random.uniform(-max_angle, max_angle) * (3.141592 / 180.0)
@@ -294,12 +300,11 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         real_shape = [img.shape[1], img.shape[2], img.shape[0]]
 
         # pc_in = pc_in.cuda() # 变换到相机坐标系下的全部激光雷达点云,Mask1表示越界的
-        mask0 = torch.zeros([self.max_points],dtype=torch.bool)
+        mask0 = torch.zeros([self.max_points], dtype=torch.bool)
         mask0[0:N] = True
         depth_gt, uv_gt, mask1 = lidar_project_depth(pc_in, calib, real_shape)
         # image_shape
         depth_gt /= self._config['max_depth']
-
 
         RR = mathutils.Quaternion(R).to_matrix()
         RR.resize_4x4()
@@ -325,25 +330,25 @@ class DatasetLidarCameraKittiOdometry(Dataset):
 
         mask = mask0 * mask1 * mask2
         # mask = torch.zeros([self.max_points],dtype =torch.bool)
-        num = mask.int().sum()
-        # print(num)
-        num0 = mask0.int().sum()
-        num1 = mask1.int().sum()
-        num2 = mask2.int().sum()
+        # num = mask.int().sum()
+        # # print(num)
+        # num0 = mask0.int().sum()
+        # num1 = mask1.int().sum()
+        # num2 = mask2.int().sum()
         # 16 32, 32 64, 64 128, 128 256,
         if self.split == 'test':
             sample = {'rgb': img, 'point_cloud': pc_in, 'calib': calib,
                       'tr_error': T, 'rot_error': R, 'seq': int(seq), 'img_path': img_path,
                       'rgb_name': rgb_name + '.png', 'item': item, 'extrin': RT,
                       'initial_RT': initial_RT, 'uv': uv, 'uv_gt': uv_gt,
-                      'mask': mask, 'pcl_xyz': pc_rotated}
+                      'mask': mask, 'pcl_xyz': pc_rotated, 'img': img0}
         else:
             sample = {'rgb': img, 'point_cloud': pc_in, 'calib': calib,
                       'tr_error': T, 'rot_error': R, 'seq': int(seq),
                       'rgb_name': rgb_name, 'item': item, 'extrin': RT, 'lidar_input': depth_img,
                       'rgb_input': rgb, 'pc_rotated': pc_rotated, 'shape_pad': shape_pad,
                       'real_shape': real_shape, 'depth_gt': depth_gt, 'uv': uv, 'uv_gt': uv_gt,
-                      'mask': mask, 'pcl_xyz': pc_rotated}
+                      'mask': mask, 'pcl_xyz': pc_rotated, 'img': img0}
 
         return sample
 
