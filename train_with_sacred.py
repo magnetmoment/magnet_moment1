@@ -26,7 +26,6 @@ import torch.nn.parallel
 import torch.optim as optim
 import torch.utils.data
 import torch.nn as nn
-import cv2 as cv
 from sacred import Experiment
 from sacred.utils import apply_backspaces_and_linefeeds
 
@@ -47,6 +46,41 @@ ex.captured_out_filter = apply_backspaces_and_linefeeds
 
 
 # noinspection PyUnusedLocal
+# @ex.config
+# def config():
+#     checkpoints = '/root/autodl-tmp/LCCNet/output/'
+#     # dataset = 'kitti/odom' # 'kitti/raw'
+#     # data_folder = '/home/wangshuo/Datasets/KITTI/odometry/data_odometry_full/'
+#     dataset = 'kitti/odom'  # 'kitti/raw'/media/hxz/Data21/kitti/semantic-kitti/dataset/SemanticKITTI/sequences
+#     # data_folder = '/root/autodl-tmp/semantic-kitti/dataset/SemanticKITTI'
+#     data_folder = '/media/hxz/Data21/kitti/semantic-kitti/dataset/SemanticKITTI'
+#     use_reflectance = False
+#     val_sequence = 1
+#     epochs = 80
+#     ratio = 0.5  # 用多少比例的训练集
+#     BASE_LEARNING_RATE = 3e-4  # 1e-4
+#     loss = 'combined'
+#     max_t = 1.5  # 1.5, 1.0,  0.5,  0.2,  0.1
+#     max_r = 20.0  # 20.0, 10.0, 5.0,  2.0,  1.0
+#     batch_size = 1  # 120
+#     num_worker = 0
+#     network = 'Res_f1'
+#     optimizer = 'adam'
+#     resume = True
+#     weights = None
+#     weights = '/home/hxz/LCCNet/checkpoint_r_e80.tar'
+#     rescale_rot = 1.0
+#     rescale_transl = 2.0
+#     precision = "O0"
+#     norm = 'bn'
+#     dropout = 0.0
+#     max_depth = 80.
+#     weight_point_cloud = 0.5
+#     log_frequency = 100
+#     print_frequency = 100
+#     starting_epoch = 0
+#     max_points = 24000
+
 @ex.config
 def config():
     checkpoints = '/root/autodl-tmp/LCCNet/output/'
@@ -69,7 +103,7 @@ def config():
     optimizer = 'adam'
     resume = True
     weights = None
-    # weights = '/root/autodl-tmp/LCCNet/checkpoint_r_e70.tar'
+    # weights = None#'/home/hxz/LCCNet/checkpoint_r_e80.tar'
     rescale_rot = 1.0
     rescale_transl = 2.0
     precision = "O0"
@@ -135,7 +169,8 @@ def train(model, optimizer, rgb_img, refl_img, target_transl, target_rot,
     optimizer.zero_grad()
     # Run model
     mask = mask.cuda()
-    T_dist, sparse_flow = model(rgb_img, refl_img, uv, pcl_xyz, mask, K)  # BCWH   B C   W H   B N 2   B N 3   B N 1
+    T_dist, sparse_flow, sparse_flow3, sparse_flow4, sparse_flow5, sparse_flow6 \
+        = model(rgb_img, refl_img, uv, uv_gt, pcl_xyz, mask, K)  # BCWH   B C   W H   B N 2   B N 3   B N 1
 
     # imgArray = np.array(sample['img'][0])
     # imgArray = imgArray[:, :, [2, 1, 0]]
@@ -157,24 +192,31 @@ def train(model, optimizer, rgb_img, refl_img, target_transl, target_rot,
     # cv.imshow('rgb', imgArray)
     # cv.waitKey(0)
     model_end = time.time()
+    # T_dist = T_dist.inverse()
     if loss == 'points_distance' or loss == 'combined':
-        losses = loss_fn(point_clouds, target_transl, target_rot, T_dist[:, 3, 0:3], T_dist[:, 0:3, 0:3])
+        losses = loss_fn(point_clouds, target_transl, target_rot, T_dist[:, 0:3, 3], T_dist[:, 0:3, 0:3])
         # sparse_flow = sparse_flow[:,:,0:2]
-        # gt_flow = (uv - uv_gt).cuda().float()
-        flow = torch.abs(sparse_flow[:, :, 0:2] - (uv - uv_gt).cuda().float()) * mask.unsqueeze(-1)
-        # temp = flow.sum() 
-        losses['flow_loss'] = 0.1 * flow.sum() / torch.clamp(torch.sum(mask.float()), 1)
-        # losses['total_loss'] = 0.25 * flow.mean()  # + losses['total_loss']
+        # gt_flow = (uv - uv_gt).cuda().float() 光流:从绕动后的推测绕动前的
+        flow_gt = (uv_gt - uv).cuda().float()
+        flow = torch.abs(sparse_flow[:, :, 0:2] - flow_gt) * mask.unsqueeze(-1)
+        flow3 = torch.abs(sparse_flow3[:, :, 0:2] - flow_gt) * mask.unsqueeze(-1)
+        flow4 = torch.abs(sparse_flow4[:, :, 0:2] - flow_gt) * mask.unsqueeze(-1)
+        flow5 = torch.abs(sparse_flow5[:, :, 0:2] - flow_gt) * mask.unsqueeze(-1)
+        flow6 = torch.abs(sparse_flow6[:, :, 0:2] - flow_gt) * mask.unsqueeze(-1)
+        num = torch.clamp(torch.sum(mask.float()), 1)
+        losses['flow_loss'] = 0.2 * (0.32 * flow.sum() + 0.08 * flow3.sum()
+                                      + 0.02 * flow4.sum() + 0.01 * flow5.sum() + 0.005 * flow6.sum()) / num
+        # losses['flow_loss'] = 0.1 * flow.sum() / num  # + losses['total_loss']
         losses['total_loss'] = losses['flow_loss']
     else:
-        losses = loss_fn(target_transl, target_rot, T_dist[:, 3, 0:3], T_dist[:, 0:3, 0:3])
+        losses = loss_fn(target_transl, target_rot, T_dist[:, 0:3, 3], T_dist[:, 0:3, 0:3])
 
     loss_end = time.time()
     DEBUG(f'loss time cost :{loss_end - model_end}')
     losses['total_loss'].backward()
     optimizer.step()
 
-    return losses, T_dist[:, 0:3, 0:3], T_dist[:, 3, 0:3]
+    return losses, T_dist[:, 0:3, 0:3], T_dist[:, 0:3, 3]
 
 
 # CNN test
@@ -377,7 +419,7 @@ def main(_config, _run, seed):
     val_iter = 0
     # EPOCH = epoch
     # tbar = tqdm(total = _config['epochs'], desc='epochs',leave=True, dynamic_ncols=True)
-    for epoch in range(starting_epoch, _config['epochs']+1):
+    for epoch in range(starting_epoch, _config['epochs'] + 1):
 
         INFO('This is %d-th epoch' % epoch)
         epoch_start_time = time.time()
@@ -415,15 +457,15 @@ def main(_config, _run, seed):
             rgb_input = sample['rgb_input'].cuda()
             # 384 1280
             rgb_input = F.interpolate(rgb_input, size=[128, 512], mode="bilinear")
-            lidar_input = F.interpolate(lidar_input, size=[128, 512], mode="bilinear")
+            # lidar_input = F.interpolate(lidar_input, size=[128, 512], mode="bilinear")
             end_preprocess = time.time()
             # with torch.autograd.set_detect_anomaly(True):
             # with torch.no_grad():
             loss, R_predicted, T_predicted = train(model, optimizer, rgb_input, lidar_input,
-                                                    sample['tr_error'], sample['rot_error'],
-                                                    sample['uv'], sample['uv_gt'], sample['pcl_xyz'], sample['mask'],
-                                                    loss_fn, sample['point_cloud'], _config['loss'], sample['calib'],
-                                                    sample)
+                                                   sample['tr_error'], sample['rot_error'],
+                                                   sample['uv'], sample['uv_gt'], sample['pcl_xyz'], sample['mask'],
+                                                   loss_fn, sample['point_cloud'], _config['loss'], sample['calib'],
+                                                   sample)
 
             DEBUG(f'train method time cost:{time.time() - end_preprocess}')
             DEBUG(f'end train time cost{time.time() - start_time}')

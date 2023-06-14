@@ -55,8 +55,6 @@ from models.correlation_package.correlation import Correlation
 # __all__ = [
 #     'calib_net'
 # ]
-
-
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -247,85 +245,6 @@ class ResnetEncoder(nn.Module):
 
         return self.features  #
 
-
-class SpatialTransformer(nn.Module):
-    """
-    Implements a spatial transformer
-    as proposed in the Jaderberg paper.
-    Comprises of 3 parts:
-    1. Localization Net
-    2. A grid generator
-    3. A roi pooled module.
-
-    The current implementation uses a very small convolutional net with
-    2 convolutional layers and 2 fully connected layers. Backends
-    can be swapped in favor of VGG, ResNets etc. TTMV
-    Returns:
-    A roi feature map with the same input spatial dimension as the input feature map.
-    """
-
-    def __init__(self, in_channels, spatial_dims, kernel_size, use_dropout=False):
-        super(SpatialTransformer, self).__init__()
-        self._h, self._w = spatial_dims
-        self._in_ch = in_channels
-        self._ksize = kernel_size
-        self.dropout = use_dropout
-
-        # localization net
-        self.conv1 = nn.Conv2d(in_channels, 32, kernel_size=self._ksize, stride=1, padding=1,
-                               bias=False)  # size : [1x3x32x32]
-        self.conv2 = nn.Conv2d(32, 32, kernel_size=self._ksize, stride=1, padding=1, bias=False)
-        self.conv3 = nn.Conv2d(32, 32, kernel_size=self._ksize, stride=1, padding=1, bias=False)
-        self.conv4 = nn.Conv2d(32, 32, kernel_size=self._ksize, stride=1, padding=1, bias=False)
-        self.conv5 = nn.Conv2d(32, 32, kernel_size=self._ksize, stride=1, padding=1, bias=False)
-        self.conv6 = nn.Conv2d(32, 32, kernel_size=self._ksize, stride=1, padding=1, bias=False)
-
-        self.fc1 = nn.Linear(32 * 32 * 64, 1024)
-        self.fc2 = nn.Linear(1024, 1)
-
-    def forward(self, x):  # stn
-        """
-        Forward pass of the STN module.
-        x -> input feature map
-        """
-        batch_images = x  # B，1，256，512
-        x = F.relu(self.conv1(x.detach()))  # B，32，W，H
-        x = F.relu(self.conv2(x))  # B,32,W,H
-        x = F.max_pool2d(x, 2)  # B,32,W/2,H/2
-        x = F.relu(self.conv3(x))  # B,32,W/2,H/2
-        x = F.max_pool2d(x, 2)  # B,32,W/4,H/4
-        x = F.relu(self.conv4(x))  # B,32,W/4,H/4
-        x = F.max_pool2d(x, 2)  # B,32,W/8,H/8
-        # x = F.relu(self.conv5(x))  # B,32,W/8,H/8
-        # x = F.max_pool2d(x, 2)  # B,32,W/16,H/16
-        # x = F.relu(self.conv6(x))  # B,32,W/16,H/16
-        # x = F.max_pool2d(x, 2)  # B,32,W/32,H/32
-
-        # print("Pre view size:{}".format(x.size()))  128 32 4 4
-        x = x.view(-1, 32 * 32 * 64)  # B,N
-        if self.dropout:
-            x = F.dropout(self.fc1(x), p=0.5)
-            x = F.dropout(self.fc2(x), p=0.5)
-        else:
-            x = self.fc1(x)  # B,1024
-            x = self.fc2(x)  # params [Nx6] B,6
-
-        x = x.view(-1, 1, 1)  # change it to the 2x3 matrix    hudu
-        cs = torch.cos(x)
-        ss = torch.sin(x)
-        h = 1e-8 * torch.ones(x.shape[0], 2, x.shape[2]).to(x.device)
-        x = torch.cat([torch.cat([cs, -ss], 1), torch.cat([ss, cs], 1)], 2)
-        x = torch.cat([x, h], 2)
-        # [[math.cos(degree), -math.sin(degree), 1e-8], [math.sin(degree), math.cos(degree), 1e-8]]
-
-        affine_grid_points = F.affine_grid(x, torch.Size((x.size(0), self._in_ch, self._h, self._w)))  # 128，32，32，2
-        assert (affine_grid_points.size(0) == batch_images.size(
-            0)), "The batch sizes of the input images must be same as the generated grid."
-        rois = F.grid_sample(batch_images, affine_grid_points)  # 128，3，32，32
-        # print("rois found to be of size:{}".format(rois.size())) 128,3,32,32
-        return rois
-
-
 def bilinear_interpolate_torch(im, x, y, align=False):
     """
     Args:
@@ -381,6 +300,97 @@ def bilinear_interpolate_torch(im, x, y, align=False):
     return ans
 
 
+class SparseinvariantConv(nn.Module):
+
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size):
+        super().__init__()
+
+        padding = kernel_size // 2
+
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            bias=False)
+
+        self.bias = nn.Parameter(
+            torch.zeros(out_channels),
+            requires_grad=True)
+
+        self.sparsity = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            bias=False)
+
+        kernel = torch.FloatTensor(torch.ones([kernel_size, kernel_size])).unsqueeze(0).unsqueeze(0)
+
+        self.sparsity.weight = nn.Parameter(
+            data=kernel,
+            requires_grad=False)
+
+        self.relu = nn.ReLU(inplace=True)
+
+        self.max_pool = nn.MaxPool2d(
+            kernel_size,
+            stride=1,
+            padding=padding)
+
+    def forward(self, x, mask):
+        x = x * mask
+        x = self.conv(x)
+        normalizer = 1 / torch.clamp(self.sparsity(mask), 1)
+        x = x * normalizer + self.bias.unsqueeze(0).unsqueeze(2).unsqueeze(3)
+        x = self.relu(x)
+
+        mask = self.max_pool(mask)
+
+        return x, mask
+
+class Sparseinvariantavg(nn.Module):
+
+    def __init__(self,
+                 in_channels = 2,
+                 out_channels = 2,
+                 kernel_size = 2,
+                 stride = 2):
+        super().__init__()
+
+        padding = kernel_size - 1 // 2
+
+        self.sparsity = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size = kernel_size,
+            padding = padding,
+            stride = stride,
+            bias=False)
+
+        kernel = torch.FloatTensor(torch.ones([kernel_size, kernel_size])).unsqueeze(0).unsqueeze(0)
+
+        self.sparsity.weight = nn.Parameter(
+            data=kernel,
+            requires_grad=False)
+
+        self.max_pool = nn.MaxPool2d(
+            kernel_size,
+            stride=1,
+            padding=padding)
+
+    def forward(self, x, mask):
+        x1 = x * mask
+        x = self.sparsity(x1)
+        x = x / torch.clamp(self.sparsity(mask), 1)
+
+        mask = self.max_pool(mask)
+
+        return x, mask
+
 class LCCNet(nn.Module):
     """
     Based on the PWC-DC net. add resnet encoder, dilation convolution and densenet connections
@@ -434,7 +444,12 @@ class LCCNet(nn.Module):
 
         # lidar_image
         self.inplanes = 32
-        self.conv1_lidar = nn.Conv2d(input_lidar, 32, kernel_size=7, stride=2, padding=3)
+        self.spic1 = SparseinvariantConv(1, 4, 5)
+        self.spic2 = SparseinvariantConv(4, 4, 5)
+        self.maxpool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)#348 1280 -> 174 640
+        self.spic3 = SparseinvariantConv(4, 16, 3)
+        # 174 640 -> 128,512
+        self.conv1_lidar = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1) # 128,512->64 256
         self.elu_lidar = nn.ELU()
         self.leakyRELU_lidar = nn.LeakyReLU(0.1)
         self.maxpool_lidar = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
@@ -477,10 +492,26 @@ class LCCNet(nn.Module):
         self.conv6_3 = myconv(96, 64, kernel_size=3, stride=1)
         self.conv6_4 = myconv(64, 32, kernel_size=3, stride=1)
 
+        #稠密化光流
+        self.spic_flow1 = SparseinvariantConv(2, 2, 5)#128 512
+        self.spic_flow2 = Sparseinvariantavg(2,2,3,2)
+        self.spic_flow2 = SparseinvariantConv(2, 2, 3)#64 256
+        self.spic_flow3 = Sparseinvariantavg(2,2,3,2)
+        self.spic_flow3 = Sparseinvariantavg(2,2,3,2)
+        self.spic_flow3 = SparseinvariantConv(2, 2, 3)#32 128
+        self.spic_flow4 = SparseinvariantConv(2, 2, 3)#16 64
+
         if use_feat_from > 1:
-            self.predict_flow6 = predict_flow(32)
-            self.deconv6 = deconv(2, 2, kernel_size=4, stride=2, padding=1)
-            self.upfeat6 = deconv(32, 2, kernel_size=4, stride=2, padding=1)
+            self.upfeat6 = deconv(32, 2, kernel_size=2, stride=2)
+
+            self.pos6 = nn.Conv2d(3, 32, kernel_size=1, bias=False)#位置编码
+            self.weight6 = nn.Conv2d(32, 1, kernel_size=1, bias=False)#权重
+            self.estimate6 = nn.Sequential(
+                nn.Conv2d(32, 32, kernel_size=1, bias=False),
+                nn.ReLU(),
+            )
+            self.rot6 = nn.Conv2d(32, 4, kernel_size=1, bias=False),
+            self.trans6 = nn.Conv2d(32, 3, kernel_size=1, bias=False),
 
             od = nd + add_list[0] + 4
             self.conv5_0 = myconv(od, 128, kernel_size=3, stride=1)
@@ -490,9 +521,16 @@ class LCCNet(nn.Module):
             self.conv5_4 = myconv(64, 32, kernel_size=3, stride=1)
 
         if use_feat_from > 2:
-            self.predict_flow5 = predict_flow(32)
-            self.deconv5 = deconv(2, 2, kernel_size=4, stride=2, padding=1)
-            self.upfeat5 = deconv(32, 2, kernel_size=4, stride=2, padding=1)
+            self.upfeat5 = deconv(32, 2, kernel_size=2, stride=2)
+
+            self.pos5 = nn.Conv2d(3, 32, kernel_size=1, bias=False)  # 位置编码
+            self.weight5 = nn.Conv2d(32, 1, kernel_size=1, bias=False)  # 权重
+            self.estimate5 = nn.Sequential(
+                nn.Conv2d(32, 32, kernel_size=1, bias=False),
+                nn.ReLU(),
+            )
+            self.rot5 = nn.Conv2d(32, 4, kernel_size=1, bias=False),
+            self.trans5 = nn.Conv2d(32, 3, kernel_size=1, bias=False),
 
             od = nd + add_list[1] + 4
             self.conv4_0 = myconv(od, 128, kernel_size=3, stride=1)
@@ -502,9 +540,16 @@ class LCCNet(nn.Module):
             self.conv4_4 = myconv(64, 32, kernel_size=3, stride=1)
 
         if use_feat_from > 3:
-            self.predict_flow4 = predict_flow(32)
-            self.deconv4 = deconv(2, 2, kernel_size=4, stride=2, padding=1)
-            self.upfeat4 = deconv(32, 2, kernel_size=4, stride=2, padding=1)
+            self.upfeat4 = deconv(32, 2, kernel_size=2, stride=2)
+
+            self.pos4 = nn.Conv2d(3, 32, kernel_size=1, bias=False)  # 位置编码
+            self.weight4 = nn.Conv2d(32, 1, kernel_size=1, bias=False)  # 权重
+            self.estimate4 = nn.Sequential(
+                nn.Conv2d(32, 32, kernel_size=1, bias=False),
+                nn.ReLU(),
+            )
+            self.rot4 = nn.Conv2d(32, 4, kernel_size=1, bias=False),
+            self.trans4 = nn.Conv2d(32, 3, kernel_size=1, bias=False),
 
             od = nd + add_list[2] + 4
             self.conv3_0 = myconv(od, 128, kernel_size=3, stride=1)
@@ -514,9 +559,15 @@ class LCCNet(nn.Module):
             self.conv3_4 = myconv(64, 32, kernel_size=3, stride=1)
 
         if use_feat_from > 4:
-            self.predict_flow3 = predict_flow(32)
-            self.deconv3 = deconv(2, 2, kernel_size=4, stride=2, padding=1)
-            self.upfeat3 = deconv(32, 2, kernel_size=4, stride=2, padding=1)
+            self.upfeat3 = deconv(32, 2, kernel_size=2, stride=2)
+            self.pos3 = nn.Conv2d(3, 32, kernel_size=1, bias=False)  # 位置编码
+            self.weight3 = nn.Conv2d(32, 1, kernel_size=1, bias=False)  # 权重
+            self.estimate3 = nn.Sequential(
+                nn.Conv2d(32, 32, kernel_size=1, bias=False),
+                nn.ReLU(),
+            )
+            self.rot3 = nn.Conv2d(32, 4, kernel_size=1, bias=False),
+            self.trans3 = nn.Conv2d(32, 3, kernel_size=1, bias=False),
 
             od = nd + add_list[3] + 4
             self.conv2_0 = myconv(od, 128, kernel_size=3, stride=1)
@@ -525,17 +576,25 @@ class LCCNet(nn.Module):
             self.conv2_3 = myconv(96, 64, kernel_size=3, stride=1)
             self.conv2_4 = myconv(64, 32, kernel_size=3, stride=1)
 
-        if use_feat_from > 5:
-            self.predict_flow2 = predict_flow(32)
-            self.deconv2 = deconv(2, 2, kernel_size=4, stride=2, padding=1)
-
-            self.dc_conv1 = myconv(32, 64, kernel_size=3, stride=1, padding=1, dilation=1)
-            self.dc_conv2 = myconv(64, 96, kernel_size=3, stride=1, padding=2, dilation=2)
-            self.dc_conv3 = myconv(96, 128, kernel_size=3, stride=1, padding=4, dilation=4)
-            self.dc_conv4 = myconv(128, 96, kernel_size=3, stride=1, padding=8, dilation=8)
-            self.dc_conv5 = myconv(96, 64, kernel_size=3, stride=1, padding=16, dilation=16)
-            self.dc_conv6 = myconv(64, 32, kernel_size=3, stride=1, padding=1, dilation=1)
-            self.dc_conv7 = predict_flow(32)
+            self.pos2 = nn.Conv2d(3, 32, kernel_size=1, bias=False)  # 位置编码
+            self.weight2 = nn.Conv2d(32, 1, kernel_size=1, bias=False)  # 权重
+            self.estimate2 = nn.Sequential(
+                nn.Conv2d(32, 32, kernel_size=1, bias=False),
+                nn.ReLU(),
+            )
+            self.rot2 = nn.Conv2d(32, 4, kernel_size=1, bias=False),
+            self.trans2 = nn.Conv2d(32, 3, kernel_size=1, bias=False),
+        # if use_feat_from > 5:
+        #     self.deconv2 = deconv(32, 32, kernel_size=2, stride=2)
+        #     self.upfeat2 = deconv(32, 2, kernel_size=2, stride=2)
+        #
+        #     self.dc_conv1 = myconv(32, 64, kernel_size=3, stride=1, padding=1, dilation=1)
+        #     self.dc_conv2 = myconv(64, 96, kernel_size=3, stride=1, padding=2, dilation=2)
+        #     self.dc_conv3 = myconv(96, 128, kernel_size=3, stride=1, padding=4, dilation=4)
+        #     self.dc_conv4 = myconv(128, 96, kernel_size=3, stride=1, padding=8, dilation=8)
+        #     self.dc_conv5 = myconv(96, 64, kernel_size=3, stride=1, padding=16, dilation=16)
+        #     self.dc_conv6 = myconv(64, 32, kernel_size=3, stride=1, padding=1, dilation=1)
+        #     self.dc_conv7 = predict_flow(32)
 
         self.get_weight = nn.Sequential(
             nn.Conv2d(32, 1, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), groups=1, bias=True),
@@ -620,7 +679,7 @@ class LCCNet(nn.Module):
 
         return output * mask
 
-    def newton_gauss(self, pc, u, v, flow, weight, mask, K0):
+    def newton_gauss(self, pc, u, v, u_t, v_t, flow, weight, mask, K0):
         K = K0.float()  # flow = u_t - u
         B = flow.shape[0]
         N = flow.shape[1]
@@ -633,17 +692,21 @@ class LCCNet(nn.Module):
         pc_f0 = pc.clone()
         fx = K[:, 0, 0:1]
         fy = K[:, 1, 1:2]
-        u_t = (u + flow[:, :, 0]).float()
+        u_t = (u + flow[:, :, 0]).float()  # 逆光流得到gt
         v_t = (v + flow[:, :, 1]).float()
+        # u_t = u_t.clone().float()  # 逆光流得到gt
+        # v_t = v_t.clone().float()
         T_dist = torch.zeros([B, 4, 4], dtype=torch.float32).cuda()
         T_dist[:, 0, 0] = 1
         T_dist[:, 1, 1] = 1
         T_dist[:, 2, 2] = 1
         T_dist[:, 3, 3] = 1
         W = weight.squeeze(-1).float() * mask.float()
+        mask_num = mask.float().sum(dim=1)
         WH = W.unsqueeze(-1).unsqueeze(-1)
-        eps = 1e-6
-        for i in range(0):
+        eps = 1e-3
+        for i in range(M):
+            # pc_f[0]=0
             x = pc_f[:, 0, :]  # B N
             y = pc_f[:, 1, :]  # B N
             z = torch.clamp(pc_f[:, 2, :], eps, 80)  # B N
@@ -688,18 +751,32 @@ class LCCNet(nn.Module):
 
             H = JT.matmul(J)  # B N 6 6
             H = WH * H  # B N 6 6
-            H[:, :, :, :] = 0
+            # H[:, :, :, :] = 0
             # a = eps * torch.eye(6).cuda()
             H = torch.mean(H, dim=1) + 1e-3 * torch.eye(6).cuda()
-            H_1 = torch.cholesky_inverse(torch.linalg.cholesky(H))
+
+            # try:
+            # print(H.cpu())
+            # print("aaaaaaaaaaa")
+            # temp = np.load('save_x.npy')
+            # H = torch.from_numpy(temp)
+            # H2 = H[10]
+            H_1 = torch.inverse(H)
+            # except:
+            #     np.save('save_x',H.detach().cpu().numpy())
+            #     print(H[0].cpu())
+            #     print(mask_num)
+            # H_1 = H_1.cuda()
             r00 = u_t - u  # B N 2 1
             r10 = v_t - v
             r = torch.stack([r00, r10], dim=2).reshape(B, N, 2, 1)
             b = WH * JT.matmul(r)  # B N 6 1
             b = b.mean(dim=1)
             dx = H_1.matmul(b).squeeze(-1)  # 得到迭代结果 # B 6
+            dx = torch.clamp(dx, -10, 10)
             T_dist = SE3.exp(dx).matrix().matmul(T_dist)  # 更新 # B 4 4
-            pc_f = T_dist.matmul(pc_f0)
+            pc_f = T_dist.matmul(pc_f0)  # 恢复T_dist
+
             # delta_T = T_dist[0].inverse().matmul(RT)
             # print(step)
             # proj = proj.permute(0, 2, 1)
@@ -716,94 +793,45 @@ class LCCNet(nn.Module):
         sparse_flow[:, 1, :] = sparse_flow[:, 1, :].clone() / z - v
         return T_dist, sparse_flow
 
-    def forward(self, rgb, lidar, uv, pcl_xyz, mask, K):  # B，N，H  插值
-        # H, W = rgb.shape[2:4]
-        # ig=rgb.cpu().numpy()[0].transpose(1,2,0)
-        # # cv2.imwrite("{}/img.png".format(savepath),ig)
-        # li=lidar.cpu().numpy()[0].transpose(1,2,0)
-        # # cv2.imwrite("{}/lidar.png".format(savepath),li)
-        # plt.imshow(ig)
-        # plt.axis("off")
-        # plt.savefig("{}/img.png".format(savepath))
-        # # plt.show()
-        # plt.imshow(li)
-        # plt.axis("off")
-        # plt.savefig("{}/lidar.png".format(savepath))
-        # plt.show()
-        # cv2.imshow('lidar',ig)
-        # cv2.imshow('lidar2', li)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
+    def forward(self, rgb, lidar, uv, uv_t, pcl_xyz, mask, K):  # B，N，H  插值
+        # rgb_image
+        features1 = self.net_encoder(rgb)  # snet encode  6 feature 64，64，64，128，256，512
+        c12 = features1[0]  # 2 1，64，128，256
+        c13 = features1[2]  # 4 1，64，64，128
+        c14 = features1[3]  # 8 1,128，32，64
+        c15 = features1[4]  # 16 1，256，16，32
+        c16 = features1[5]  # 32 1，512，8，16
 
-        # encoder
-        if self.pretrained_encoder:  # TRUE
-            # rgb_image  1，3，256，512
-            features1 = self.net_encoder(rgb)  # snet encode  6 feature 64，64，64，128，256，512
-            c12 = features1[0]  # 2 1，64，128，256
-            # draw_features(8, 8, c12.cpu().numpy(), "{}/img_c12.png".format(savepath))
-            c13 = features1[2]  # 4 1，64，64，128
-            # draw_features(8, 8, c13.cpu().numpy(), "{}/img_c13.png".format(savepath))
-            c14 = features1[3]  # 8 1,128，32，64
-            # draw_features(8, 16, c14.cpu().numpy(), "{}/img_c14.png".format(savepath))
-            c15 = features1[4]  # 16 1，256，16，32
-            # draw_features(16, 16, c15.cpu().numpy(), "{}/img_c15.png".format(savepath))
-            c16 = features1[5]  # 32 1，512，8，16
-            # draw_features(16, 32, c16.cpu().numpy(), "{}/img_c16.png".format(savepath))
-
-            # rot_lidar = self.stnmod(lidar)
-
-            # lidar_image
-            x2 = self.conv1_lidar(lidar)  # 1，64，128，256
-            # draw_features(8, 8, x2.cpu().numpy(), "{}/lidar_x2.png".format(savepath))
-            if self.Action_Func == 'leakyrelu':
-                c22 = self.leakyRELU_lidar(x2)  # 2
-            elif self.Action_Func == 'elu':
-                c22 = self.elu_lidar(x2)  # 2 1，64，128，256
-            # draw_features(8, 8, c22.cpu().numpy(), "{}/lidar_c22.png".format(savepath))
-            c23 = self.layer1_lidar(self.maxpool_lidar(c22))  # 4 pool 32,64,64,128
-            # draw_features(8, 8, c23.cpu().numpy(), "{}/lidar_c23.png".format(savepath))
-            c24 = self.layer2_lidar(c23)  # 8  32，128，32，64
-            # draw_features(8, 16, c24.cpu().numpy(), "{}/lidar_c24.png".format(savepath))
-            c25 = self.layer3_lidar(c24)  # 16  32，256，16，32
-            # draw_features(16, 16, c25.cpu().numpy(), "{}/lidar_c25.png".format(savepath))
-            c26 = self.layer4_lidar(c25)  # 32  32，512，8，16
-            # draw_features(16, 32, c26.cpu().numpy(), "{}/lidar_c26.png".format(savepath))
-        else:
-            x1 = self.conv1_rgb(rgb)
-            x2 = self.conv1_lidar(lidar)
-            if self.Action_Func == 'leakyrelu':
-                c12 = self.leakyRELU_rgb(x1)  # 2
-                c22 = self.leakyRELU_lidar(x2)  # 2
-            elif self.Action_Func == 'elu':
-                c12 = self.elu_rgb(x1)  # 2
-                c22 = self.elu_lidar(x2)  # 2
-            c13 = self.layer1_rgb(self.maxpool_rgb(c12))  # 4
-            c23 = self.layer1_lidar(self.maxpool_lidar(c22))  # 4
-            c14 = self.layer2_rgb(c13)  # 8
-            c24 = self.layer2_lidar(c23)  # 8
-            c15 = self.layer3_rgb(c14)  # 16
-            c25 = self.layer3_lidar(c24)  # 16
-            c16 = self.layer4_rgb(c15)  # 32
-            c26 = self.layer4_lidar(c25)  # 32
+        # lidar_image
+        conv_mask = lidar.bool().float32()
+        x2, conv_mask = self.spic1(lidar,conv_mask)
+        x2, conv_mask = self.spic2(x2,conv_mask)
+        x2 = self.maxpool1(x2)
+        conv_mask = self.maxpool1(conv_mask)
+        x2 = self.spic3(x2,conv_mask)
+        x2 = F.interpolate(x2, size=[128, 512], mode="bilinear")
+        x2 = self.conv1_lidar(x2)  # 1，64，128，256
+        if self.Action_Func == 'leakyrelu':
+            c22 = self.leakyRELU_lidar(x2)  # 2
+        elif self.Action_Func == 'elu':
+            c22 = self.elu_lidar(x2)  # 2 1，64，128，256
+        c23 = self.layer1_lidar(self.maxpool_lidar(c22))  # 4 pool 32,64,64,128
+        c24 = self.layer2_lidar(c23)  # 8  32，128，32，64
+        c25 = self.layer3_lidar(c24)  # 16  32，256，16，32
+        c26 = self.layer4_lidar(c25)  # 32  32，512，8，16
 
         corr6 = self.corr(self.reduce6(c16), c26)  # 最后一层  1，512，8，16  O   1，81，8，16
-        # draw_features(9, 9, c23.cpu().numpy(), "{}/corr6.png".format(savepath))
         corr6 = self.leakyRELU(corr6)
         x = self.conv6_0(corr6)  # 32，81+128,8,16   209
-        # draw_features(16, 16, x.cpu().numpy(), "{}/x_1.png".format(savepath))
         x = self.conv6_1(x)  # 32,81+128+128,8,16      337
-        # draw_features(20, 20, x.cpu().numpy(), "{}/x_2.png".format(savepath))
         x = self.conv6_2(x)  # 32,81+128+128+96,8,16   433
-        # draw_features(25, 25, x.cpu().numpy(), "{}/x_3.png".format(savepath))
         x = self.conv6_3(x)  # 32,81+128+128+96+64,8,16 497
-        # draw_features(25, 25, x.cpu().numpy(), "{}/x_4.png".format(savepath))
         x = self.conv6_4(x)  # 32,81+128+128+96+64+32,8,16 529
-        # draw_features(25, 25, x.cpu().numpy(), "{}/x_5.png".format(savepath))
+
         # use_feat_from=1
-        flow6 = self.predict_flow6(x)
         up_flow6 = self.deconv6(flow6)  # 我们直接回归出点云在当前尺寸图像下的真实光流
         up_feat6 = self.upfeat6(x)
-        # upflow6 upflow5 upflow4 upflow3 upflow2是 64 256尺度上的光流
+
         warp5 = self.warp(c25, up_flow6 / 8)
         corr5 = self.corr(self.reduce5(c15), warp5)
         corr5 = self.leakyRELU(corr5)
@@ -813,7 +841,10 @@ class LCCNet(nn.Module):
         x = self.conv5_2(x)
         x = self.conv5_3(x)
         x = self.conv5_4(x)
-
+        sparse_flow3 = bilinear_interpolate_torch(up_flow3, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4).float()
+        sparse_flow4 = bilinear_interpolate_torch(up_flow4, uv[:, :, 0] * kx4 / 2, uv[:, :, 1] * ky4 / 2).float()
+        sparse_flow5 = bilinear_interpolate_torch(up_flow5, uv[:, :, 0] * kx4 / 4, uv[:, :, 1] * ky4 / 4).float()
+        sparse_flow6 = bilinear_interpolate_torch(up_flow6, uv[:, :, 0] * kx4 / 8, uv[:, :, 1] * ky4 / 8).float()
         flow5 = self.predict_flow5(x)
         up_flow5 = self.deconv5(flow5)  # 真实光流
         up_feat5 = self.upfeat5(x)
@@ -865,13 +896,14 @@ class LCCNet(nn.Module):
         ky4 = 64.0 / 384.0
         sparse_flow = bilinear_interpolate_torch(flow2, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4).float()
         sparse_weight = bilinear_interpolate_torch(weight, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4).float()
+        # sparse_weight[:, :, :] = 1
         K4 = K.clone()
         K4[:, 0, 0] = K[:, 0, 0] * kx4
         K4[:, 0, 2] = K[:, 0, 2] * kx4
         K4[:, 1, 1] = K[:, 1, 1] * ky4
         K4[:, 1, 2] = K[:, 1, 2] * ky4
-        T_dist, rigid_flow = self.newton_gauss(pcl_xyz, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4, sparse_flow.clone(),
-                                               sparse_weight, mask, K4)
+        T_dist, rigid_flow = self.newton_gauss(pcl_xyz, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4, uv_t[:, :, 0] * kx4,
+                                               uv_t[:, :, 1] * ky4, sparse_flow.clone(), sparse_weight, mask, K4)
         # x = x.view(x.shape[0], -1)  # 32,N
         # x = self.dropout(x)
         # x = self.leakyRELU(self.fc1(x))  # 32,N to 512
@@ -884,4 +916,19 @@ class LCCNet(nn.Module):
         sparse_flow[:, :, 0] = sparse_flow[:, :, 0] / kx4
         sparse_flow[:, :, 1] = sparse_flow[:, :, 1] / ky4
 
-        return T_dist, sparse_flow  # transl, rot
+        sparse_flow3 = bilinear_interpolate_torch(up_flow3, uv[:, :, 0] * kx4, uv[:, :, 1] * ky4).float()
+        sparse_flow4 = bilinear_interpolate_torch(up_flow4, uv[:, :, 0] * kx4 / 2, uv[:, :, 1] * ky4 / 2).float()
+        sparse_flow5 = bilinear_interpolate_torch(up_flow5, uv[:, :, 0] * kx4 / 4, uv[:, :, 1] * ky4 / 4).float()
+        sparse_flow6 = bilinear_interpolate_torch(up_flow6, uv[:, :, 0] * kx4 / 8, uv[:, :, 1] * ky4 / 8).float()
+        sparse_flow6[:, :, 0] = sparse_flow6[:, :, 0] / kx4
+        sparse_flow6[:, :, 1] = sparse_flow6[:, :, 1] / ky4
+
+        sparse_flow5[:, :, 0] = sparse_flow5[:, :, 0] / kx4
+        sparse_flow5[:, :, 1] = sparse_flow5[:, :, 1] / ky4
+
+        sparse_flow4[:, :, 0] = sparse_flow4[:, :, 0] / kx4
+        sparse_flow4[:, :, 1] = sparse_flow4[:, :, 1] / ky4
+
+        sparse_flow3[:, :, 0] = sparse_flow3[:, :, 0] / kx4
+        sparse_flow3[:, :, 1] = sparse_flow3[:, :, 1] / ky4
+        return T_dist.inverse(), sparse_flow, sparse_flow3, sparse_flow4, sparse_flow5, sparse_flow6  # transl, rot
