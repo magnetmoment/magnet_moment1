@@ -420,7 +420,6 @@ class LCCNet(nn.Module):
         # resnet with leakyRELU
         self.Action_Func = Action_Func
         self.attention = attention
-        self.inplanes = 64
         if self.res_num == 50:
             layers = [3, 4, 6, 3]
             add_list = [1024, 512, 256, 64]
@@ -437,6 +436,7 @@ class LCCNet(nn.Module):
                 block = BasicBlock
 
         # rgb_image
+        self.inplanes = 64
         self.conv1_rgb = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3)
         self.elu_rgb = nn.ELU()
         self.leakyRELU_rgb = nn.LeakyReLU(0.1)
@@ -498,11 +498,11 @@ class LCCNet(nn.Module):
 
         # 稠密化光流
         self.spic_flow1 = SparseinvariantConv(2, 2, 5)  # 128 512
-        self.spic_flow2 = SparseinvariantConv(2, 2, 3)  # 128 512
+        self.spic_flow2 = SparseinvariantConv(2, 2, 5)  # 128 512
         self.spic_flow3 = Sparseinvariantavg(2, 2, 2, 2)  # 64 256
         self.spic_flow4 = Sparseinvariantavg(2, 2, 2, 2)  # 32 128
-        self.spic_flow5 = Sparseinvariantavg(2, 2, 3, 2)  # 16 64
-        self.spic_flow6 = Sparseinvariantavg(2, 2, 3, 2)  # 8 32
+        self.spic_flow5 = Sparseinvariantavg(2, 2, 2, 2)  # 16 64
+        self.spic_flow6 = Sparseinvariantavg(2, 2, 2, 2)  # 8 32
 
         if use_feat_from > 1:
             self.upfeat6 = deconv(32, 2, kernel_size=2, stride=2)
@@ -587,17 +587,6 @@ class LCCNet(nn.Module):
             )
             self.rot2 = nn.Conv2d(32, 4, kernel_size=1, bias=False),
             self.trans2 = nn.Conv2d(32, 3, kernel_size=1, bias=False),
-        # if use_feat_from > 5:
-        #     self.deconv2 = deconv(32, 32, kernel_size=2, stride=2)
-        #     self.upfeat2 = deconv(32, 2, kernel_size=2, stride=2)
-        #
-        #     self.dc_conv1 = myconv(32, 64, kernel_size=3, stride=1, padding=1, dilation=1)
-        #     self.dc_conv2 = myconv(64, 96, kernel_size=3, stride=1, padding=2, dilation=2)
-        #     self.dc_conv3 = myconv(96, 128, kernel_size=3, stride=1, padding=4, dilation=4)
-        #     self.dc_conv4 = myconv(128, 96, kernel_size=3, stride=1, padding=8, dilation=8)
-        #     self.dc_conv5 = myconv(96, 64, kernel_size=3, stride=1, padding=16, dilation=16)
-        #     self.dc_conv6 = myconv(64, 32, kernel_size=3, stride=1, padding=1, dilation=1)
-        #     self.dc_conv7 = predict_flow(32)
 
         self.get_weight = nn.Sequential(
             nn.Conv2d(32, 1, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), groups=1, bias=True),
@@ -615,11 +604,11 @@ class LCCNet(nn.Module):
             fc_size *= (image_size[1] // downsample) + 1
         # self.fc1 = nn.Linear(fc_size * 4, 512)
 
-        self.fc1_trasl = nn.Linear(512, 256)
-        self.fc1_rot = nn.Linear(512, 256)
-
-        self.fc2_trasl = nn.Linear(256, 3)
-        self.fc2_rot = nn.Linear(256, 4)
+        # self.fc1_trasl = nn.Linear(512, 256)
+        # self.fc1_rot = nn.Linear(512, 256)
+        #
+        # self.fc2_trasl = nn.Linear(256, 3)
+        # self.fc2_rot = nn.Linear(256, 4)
 
         self.dropout = nn.Dropout(dropout)
 
@@ -661,7 +650,7 @@ class LCCNet(nn.Module):
 
         if x.is_cuda:
             grid = grid.cuda()
-        vgrid = Variable(grid) + flo
+        vgrid = Variable(grid) + flo  # 光流从gt到现在
 
         # scale grid to [-1,1]
         vgrid[:, 0, :, :] = 2.0 * vgrid[:, 0, :, :].clone() / max(W - 1, 1) - 1.0
@@ -811,10 +800,8 @@ class LCCNet(nn.Module):
         x2 = self.maxpool1(x2)
         conv_mask = self.maxpool1(conv_mask)
 
-        x2, conv_mask = self.spic3(x2, conv_mask)
+        x2, conv_mask = self.spic3(x2, conv_mask)  # [192, 640]
         # mask_show = conv_mask.cpu().numpy()
-
-        x2 = F.interpolate(x2, size=[128, 512], mode="bilinear")
         x2 = self.conv1_lidar(x2)  # 1，64，128，256
         if self.Action_Func == 'leakyrelu':
             c22 = self.leakyRELU_lidar(x2)  # 2
@@ -839,21 +826,29 @@ class LCCNet(nn.Module):
         K2[:, 1, 1] = K[:, 1, 1] * ky2
         K2[:, 1, 2] = K[:, 1, 2] * ky2
 
-        K3[:, 0, 0] = K[:, 0, 0] * kx2/2
-        K3[:, 0, 2] = K[:, 0, 2] * kx2/2
-        K3[:, 1, 1] = K[:, 1, 1] * ky2/2
-        K3[:, 1, 2] = K[:, 1, 2] * ky2/2
+        K3[:, 0, 0] = K[:, 0, 0] * kx2 / 2
+        K3[:, 0, 2] = K[:, 0, 2] * kx2 / 2
+        K3[:, 1, 1] = K[:, 1, 1] * ky2 / 2
+        K3[:, 1, 2] = K[:, 1, 2] * ky2 / 2
 
-        K4[:, 0, 0] = K[:, 0, 0] * kx2/4
-        K4[:, 0, 2] = K[:, 0, 2] * kx2/4
-        K4[:, 1, 1] = K[:, 1, 1] * ky2/4
-        K4[:, 1, 2] = K[:, 1, 2] * ky2/4
+        K4[:, 0, 0] = K[:, 0, 0] * kx2 / 4
+        K4[:, 0, 2] = K[:, 0, 2] * kx2 / 4
+        K4[:, 1, 1] = K[:, 1, 1] * ky2 / 4
+        K4[:, 1, 2] = K[:, 1, 2] * ky2 / 4
 
-        K5[:, 0, 0] = K[:, 0, 0] * kx2/8
-        K5[:, 0, 2] = K[:, 0, 2] * kx2/8
-        K5[:, 1, 1] = K[:, 1, 1] * ky2/8
-        K5[:, 1, 2] = K[:, 1, 2] * ky2/8
-        return K2,K3,K4,K5
+        K5[:, 0, 0] = K[:, 0, 0] * kx2 / 8
+        K5[:, 0, 2] = K[:, 0, 2] * kx2 / 8
+        K5[:, 1, 1] = K[:, 1, 1] * ky2 / 8
+        K5[:, 1, 2] = K[:, 1, 2] * ky2 / 8
+        return K2, K3, K4, K5
+
+    def densify_flow(self, uv_now, uv_new, mask, level):
+        uv_now_index = uv_now.long()  # 索引位置 B 2 N  todo:量化补偿 384 1280 192 640
+        dense_flow = torch.zeros([uv_now.shape[0], 2, 384, 1280], dtype=torch.float32).cuda()
+        mask_flow = torch.zeros([uv_now.shape[0], 1, 384, 1280], dtype=torch.float32).cuda()
+        mask = (uv_now_index[:, 1, :] < 1280) & (uv_now_index[:, 1, :] >= 0) & \
+               (uv_now_index[:, 0, :] < 384) & (uv_now_index[:, 0, :] >= 0)
+        dense_flow
 
     def forward(self, rgb, lidar, uv, uv_t, pcl_xyz, mask, K):  # B，N，H  插值
         # rgb_image
@@ -862,23 +857,22 @@ class LCCNet(nn.Module):
         # 3.推理q和t
         # 4.计算这个层次的光流
         # 5.warp
-
+        K = K.float()
         c12, c13, c14, c15, c16, c22, c23, c24, c25, c26 = self.backbone(rgb, lidar)
 
         # 准备参数
-        kx4 = 256.0 / 1380.0
-        ky4 = 64.0 / 384.0
         ignore = (~mask).view(-1)
+        # K2, K3, K4, K5 = self.get_K(K)
 
-        # 第一次迭代
-        corr6 = self.corr(self.reduce6(c16), c26)  # 最后一层  1，512，8，16  O   1，81，8，16
+        # 第一次迭代 384 1280  192 640  ||  96 320  48 160  24 80  12 40  6 20
+        corr6 = self.corr(self.reduce6(c16), c26)
         corr6 = self.leakyRELU(corr6)
-        x = self.conv6_0(corr6)  # 32，81+128,8,16   209
-        x = self.conv6_1(x)  # 32,81+128+128,8,16      337
-        x = self.conv6_2(x)  # 32,81+128+128+96,8,16   433
-        x = self.conv6_3(x)  # 32,81+128+128+96+64,8,16 497
+        x = self.conv6_0(corr6)
+        x = self.conv6_1(x)
+        x = self.conv6_2(x)
+        x = self.conv6_3(x)
         x = self.conv6_4(x)
-        point_feature = bilinear_interpolate_torch(x, uv[:, :, 0] * kx4 / 16, uv[:, :, 1] * ky4 / 16).float()
+        point_feature = bilinear_interpolate_torch(x, uv[:, :, 0] / 64, uv[:, :, 1] / 64).float()
         pcl_xyz6 = pcl_xyz.clone()
         xyz = pcl_xyz6[:, 0:3, :].unsqueeze(-1)
         pos_feature = self.pos6(xyz)
@@ -898,23 +892,13 @@ class LCCNet(nn.Module):
         R_target = quat2mat_batch(q6)
         T_target = tvector2mat_batch(t6)
         RT_target = torch.bmm(T_target, R_target)
-        pcl_xyz5 = torch.bmm(RT_target.inverse(), pcl_xyz6)
-        K5 = K.clone()
-        K5[:, 0, 0] = K[:, 0, 0] * kx4 / 8
-        K5[:, 0, 2] = K[:, 0, 2] * kx4 / 8
-        K5[:, 1, 1] = K[:, 1, 1] * ky4 / 8
-        K5[:, 1, 2] = K[:, 1, 2] * ky4 / 8
-        uv5 = torch.bmm(K5, pcl_xyz5)
-        delta_uv5 = uv5.clone()
-        K4 = K.clone()
-        K4[:, 0, 0] = K[:, 0, 0] * kx4
-        K4[:, 0, 2] = K[:, 0, 2] * kx4
-        K4[:, 1, 1] = K[:, 1, 1] * ky4
-        K4[:, 1, 2] = K[:, 1, 2] * ky4
+        pcl_xyz5 = torch.bmm(RT_target.inverse(), pcl_xyz6)  # 现在到gt
 
-        # 逆光流
-        delta_uv5[:, :, 0] = uv5[:, :, 0] - uv[:, :, 0] * kx4 / 8
-        delta_uv5[:, :, 1] = uv5[:, :, 1] - uv[:, :, 1] * ky4 / 8
+        uv5 = torch.bmm(K, pcl_xyz5[:, 0:3, :])  # 新的uv
+        uv5[:, 0, :] = uv5[:, 0, :] / uv5[:, 2, :]
+        uv5[:, 1, :] = uv5[:, 1, :] / uv5[:, 2, :]
+        # 注意这个光流是在384 1280尺度上的
+        self.densify_flow(uv, uv5[:,0:2,:].permute(0, 2, 1), mask, 6)
 
         # 第二次迭代
         warp5 = self.warp(c25, delta_uv5)
